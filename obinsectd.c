@@ -18,9 +18,11 @@
  *  - Clock (class_id 9)
  */
 
+#include <endian.h>
 #include <errno.h>
 #include <getopt.h>
 #include <fcntl.h>
+#include <json.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -548,7 +550,7 @@ static const char *hdlc_control(unsigned char control)
 
 static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
 {
-	int i, format, segmentation, length, src, dst, control, hcs, fcs, check;
+	int i, j, format, segmentation, length, src, dst, control, hcs, fcs, check;
 
 	/* check start and stop markers */
 	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL)
@@ -609,6 +611,12 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
 	/* debug dump */
 	fprintf(stderr, "Valid HDLC frame from %d to %d with control=%#04x (%s)\n", src, dst, control, hdlc_control(control) );
 
+	/* dump HDLC header */
+	printf("%02x %04x %02x ", CONTROL, 0xa000 | length, src);
+	for (j = i; j >= 0; j--)
+		printf("%02x", (dst >> (8 * j)) & 0xff);
+	printf(" %02x %04x", control, htobe16(hcs));
+
 	/* payload starts after header */
 	return &buf[8 + i];
 }
@@ -662,12 +670,17 @@ static unsigned char *decode_datetime(unsigned char *buf, struct tm *t)
 	}
 }
 
-static int parse_cosem(unsigned char *buf, size_t buflen)
+static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object **ret)
 {
 	int i, len = 1;
 	unsigned int val;
 	unsigned long longval;
 	unsigned long long longlongval;
+	json_object *myobj;
+
+	*ret = NULL;
+	for (i = 0; i < lvl; i++)
+		printf("  ");
 
 	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
 	switch (buf[0]) {
@@ -675,19 +688,28 @@ static int parse_cosem(unsigned char *buf, size_t buflen)
 		break;
 	case 1: // array
 	case 2: // structure
+		*ret = json_object_new_array();
+		printf("%02x%02x\n", buf[0], buf[1]);
 		fprintf(stderr, "Parsing %s with %d elements\n", buf[0] == 1 ? "array" : "struct", buf[1]);
 		len += 1;
-		for (i = 0; i < buf[1]; i++)
-			len += parse_cosem(&buf[len], buflen - len);
+		for (i = 0; i < buf[1]; i++) {
+			len += parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
+			if (myobj)
+				json_object_array_add(*ret, myobj);
+		}
 		break;
 	case 5: // double-long
 		longval = buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
-		fprintf(stderr, "double-long (%ld)\n", longval);
+		*ret = json_object_new_int(longval);
+		fprintf(stderr, " (%ld)\n", longval);
+		printf("%02x %08x\n", buf[0], htobe32(longval));
 		len += 4;
 		break;
 	case 6: // double-long-unsigned
 		longval = buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
+		*ret = json_object_new_int(longval);
 		fprintf(stderr, "double-long-unsigned (%lu)\n", longval);
+		printf("%02x %08x\n", buf[0], htobe32(longval));
 		len += 4;
 		break;
 	case 9: // octet-string
@@ -695,6 +717,10 @@ static int parse_cosem(unsigned char *buf, size_t buflen)
 		for (i = 0; i < buf[1]; i++)
 			fprintf(stderr, " %02x", buf[i + 2]);
 		fprintf(stderr, "\n");
+		printf("%02x%02x ", buf[0], buf[1]);
+		for (i = 0; i < buf[1]; i++)
+			printf("%02x", buf[i + 2]);
+		printf("\n");
 		len += 1 + buf[1];
 		break;
 	case 10: // visible-string
@@ -702,24 +728,36 @@ static int parse_cosem(unsigned char *buf, size_t buflen)
 		for (i = 0; i < buf[1]; i++)
 			fprintf(stderr, "%c", buf[i + 2]);
 		fprintf(stderr, "\n");
+		printf("%02x%02x ", buf[0], buf[1]);
+		for (i = 0; i < buf[1]; i++)
+			printf("%02x", buf[i + 2]);
+		printf("\n");
 		len += 1 + buf[1];
 		break;
 	case 15: // integer
+		*ret = json_object_new_int(buf[1]);
 		fprintf(stderr, "integer (%d)\n", (char)buf[1]);
+		printf("%02x %02x\n", buf[0], buf[1]);
 		len += 1;
 		break;
 	case 16: // long
 		val = buf[1] << 8 | buf[2];
+		*ret = json_object_new_int(val);
 		fprintf(stderr, "long (%d)\n", (int)val);
+		printf("%02x %04x\n", buf[0], htobe16(val));
 		len += 2;
 		break;
 	case 17: // unsigned
+		*ret = json_object_new_int(buf[1]);
 		fprintf(stderr, "unsigned (%d)\n", buf[1]);
+		printf("%02x %02x\n", buf[0], buf[1]);
 		len += 1;
 		break;
 	case 18: // long-unsigned
 		val = buf[1] << 8 | buf[2];
+		*ret = json_object_new_int(val);
 		fprintf(stderr, "long-unsigned (%u)\n", val);
+		printf("%02x %04x\n", buf[0], htobe16(val));
 		len += 2;
 		break;
 /*	case 20: // long64
@@ -735,10 +773,16 @@ static int parse_cosem(unsigned char *buf, size_t buflen)
 		break;
 */
 	case 22: // enum
+		*ret = json_object_new_int(buf[1]);
 		fprintf(stderr, "enum (%u)\n", buf[1]);
+		printf("%02x %02x\n", buf[0], buf[1]);
 		len += 1;
 		break;
 	case 25: // date-time
+		printf("%02x ", buf[0]);
+		for (i = 1; i <= 12; i++)
+			printf("%02x", buf[i]);
+		printf("\n");
 		len += 12;
 		break;
 	default:
@@ -754,6 +798,8 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 	unsigned long invokeid;
 	unsigned char *p;
 	struct tm datetime;
+	int i;
+	json_object *myobj;
 
 	print_packet("*** payload dump: ***\n", buf, buflen);
 
@@ -766,6 +812,7 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 		return -1;
 	}
 
+	printf(" %02x%02x%02x\n", buf[0], buf[1], buf[2]);
 	/*
 	 * then follows a xDLMS APDU with:
 
@@ -785,9 +832,15 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 	p = &buf[8];
 	fprintf(stderr, "long-invoke-id-and-priority: %#010lx\n", invokeid);
 
+	printf("%02x %08x", buf[3], htobe32(invokeid));
 	/* some buggy firmwares includes a 0x09 type byte before the date-time - skip it */
 	if (p[0] == 0x09)
 		p++;
+
+	printf(" %02x ", p[0]);
+	for (i = 0; i < p[0]; i++)
+		printf("%02x", p[i + 1]);
+	printf("\n");
 
 	p = decode_datetime(p, &datetime);
 	if (!p)
@@ -795,7 +848,9 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 
 	fprintf(stderr, "date-time: %s\n", asctime(&datetime));
 
-	parse_cosem(p, buflen + buf - p);
+	parse_cosem(p, buflen + buf - p, 0, &myobj);
+
+	fprintf(stderr, "JSON: %s\n", json_object_get_string(myobj));
 	return 0;
 }
 
@@ -873,6 +928,9 @@ nextframe:
 		// got a complete frame
 		print_packet("*** frame dump: ***\n", hdlc, framelen + 2);
 		parse_payload(payload, framelen - (payload - hdlc + 1));
+
+		// print HDLC trailer
+		printf("%02x%02x %02x\n\n", hdlc[framelen - 1], hdlc[framelen], CONTROL);
 
 		// keep remaining data for next frame, including the stop marker in case it doubles as start of next frame
 		memmove(rbuf, hdlc + framelen + 1, cur - rbuf - framelen + 1);

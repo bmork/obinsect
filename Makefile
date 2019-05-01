@@ -1,8 +1,8 @@
 VERSION := 0.01
 
 CC=gcc -g -DVERSION='"$(VERSION)"'
-LDFLAGS=
-CFLAGS=-Wall
+LDFLAGS=$(shell pkg-config --libs json-c)
+CFLAGS=-Wall $(shell pkg-config --cflags json-c)
 
 BINARIES=obinsectd
 
