@@ -11,6 +11,6 @@ all: $(BINARIES)
 .PHONY clean:
 	rm -f *.o *.so *.lo *~ $(BINARIES) 
 
-obinsecd: obinsectd.c
+obinsectd: obinsectd.c
 	$(CC) $(CFLAGS) -DDEBUG -Wno-unused-function $(LDFLAGS) -o $@ $^
 

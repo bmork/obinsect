@@ -21,12 +21,14 @@
 #include <errno.h>
 #include <getopt.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef VERSION
@@ -449,9 +451,9 @@ static unsigned char *parse_hdlc_header(unsigned char *p, size_t *len)
 	return &p[7 + i];
 }
 
-static int parsebuf(char *buf, size_t buflen)
+static int parsebuf(unsigned char *buf, size_t buflen)
 {
-	unsigned char *p = (unsigned char *)buf;
+	unsigned char *p = buf;
 	size_t len = buflen;
 
 	/* 1. parse HDLC header */
@@ -496,56 +498,389 @@ static int parsebuf(char *buf, size_t buflen)
 */
 
 /* read states:
- - look for CONTROL => previous frame finished
- - look for !CONTROL => start of new frame
- - wait for 2 bytes to get HDLC frame type and length => read length-2 bytes
-     (verify frame and send to decoder)
+ - framelen < 0:  look for CONTROL
+ - framelen = 0:  look for first two bytes different from CONTROL
+ - framelen > 0:  wait for complete frame
  - repeat
 */
 
+static int hdlc_length(unsigned char *buf)
+{
+	if ((buf[1] & 0xf8) != 0xa0) {  // HDLC type 3 without segmentation
+		fprintf(stderr, "wrong frame type: %0#4x\n", buf[1] >> 4);
+		return -1;
+	}
+
+	return (buf[1] << 8 | buf[2]) & 0x7ff;
+}
+
+static unsigned char *hdlc_start(unsigned char *buf, size_t buflen)
+{
+	unsigned char *p = memchr(buf, CONTROL, buflen);
+
+	/* skip remaining CONTROL chars */
+	while (p && p - buf + 1 < buflen && p[1] == CONTROL)
+		p++;
+	return p;
+}
+
+static const char *hdlc_control(unsigned char control)
+{
+	static char buf[] = "I-frame (rsn=X, ssn=X)";
+
+	if (control & 3) { /* U-frame */
+		switch (control & 0xec) {
+		case 0:
+			return "UI-frame";
+		default:
+			return "unknown U-frame";
+		}
+	} else if (control & 1) { /* S-frame */
+		switch (control & 0x0c) {
+		default:
+			sprintf(buf, "S-frame (rsn=%d)", control >> 5);
+		}
+	} else { /* I-frame */
+		sprintf(buf, "I-frame (rsn=%d, ssn=%d)", control >> 5, (control >> 1) & 7);
+	}
+	return buf;
+}
+
+static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
+{
+	int i, format, segmentation, length, src, dst, control, hcs, fcs, check;
+
+	/* check start and stop markers */
+	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL)
+		return NULL;
+
+	/* verify header */
+	format = buf[1] >> 4;
+	if (format != 0xa) {
+		fprintf(stderr, "DLMS/COSEM requires HDLC frame format \"type 3\" - %#04x is invalid\n", format);
+		return NULL;
+	}
+
+	segmentation = !!(buf[1] & 0x08);
+	if (segmentation) {
+		fprintf(stderr, "Segmentation is not supported\n");
+		return NULL;
+	}
+
+	length = hdlc_length(buf);
+	if (length != buflen - 2) {
+		fprintf(stderr, "Invalid HDLC frame length: %d != %zd\n", length, buflen - 2);
+		return NULL;
+	}
+
+	/* src address is always 1 byte */
+	src = buf[3];
+
+	/* dst address is 1, 2 or 4 bytes */
+	dst = 0;
+	for (i = 0; i < 4; i++) {
+		dst <<= 8;
+		dst |= buf[4 + i];
+		if (dst & 1)
+			break;
+	}
+
+	if (i == 3) {
+		fprintf(stderr, "Bogus HDLC destination address - 3 bytes?: %02x %02x %02x\n", buf[4], buf[5], buf[6]);
+		return NULL;
+	}
+
+	control = buf[5 + i];
+	hcs = buf[7 + i] << 8 | buf[6 + i];
+	check = crc16((char *)(buf + 1), 5 + i);
+	if (hcs != check) {
+		fprintf(stderr, "Bogus HDLC header checksum: %#06x != %#06x\n", hcs, check);
+		return NULL;
+	}
+
+	/* This will be the HCS, and therefore redundant, in case of an empty payload */
+	fcs = buf[buflen-2] << 8 | buf[buflen-3];
+	check = crc16((char *)(buf + 1), buflen - 4);
+	if (fcs != check) {
+		fprintf(stderr, "Bogus HDLC frame checksum: %#06x != %#06x\n", fcs, check);
+		return NULL;
+	}
+
+	/* debug dump */
+	fprintf(stderr, "Valid HDLC frame from %d to %d with control=%#04x (%s)\n", src, dst, control, hdlc_control(control) );
+
+	/* payload starts after header */
+	return &buf[8 + i];
+}
+
+/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.6.1 "Date and time formats" */ 
+static unsigned char *decode_datetime(unsigned char *buf, struct tm *t)
+{
+	int deviation, status;
+
+	memset(t, 0, sizeof(*t));
+	switch (buf[0]) {
+	case 0:
+		return buf + 1;
+	case 12:
+		t->tm_year = (buf[1] << 8 | buf[2]) - 1900; /* POSIX is year - 1900 */
+		t->tm_mon = buf[3] - 1; /* COSEM is 1...12, POSIX is 0..11 */
+		t->tm_mday = buf[4];
+		t->tm_wday = !buf[5] ? 7 : buf[5];  /* COSEM is 1...7, 1 is Monday, POSIX is 0..6, 0 is Sunday */
+		t->tm_hour = buf[6];
+		t->tm_min = buf[7];
+		t->tm_sec = buf[8];
+//		hundredths = buf[9];
+		deviation = buf[10] << 8 | buf[11]; /* range -720...+720 in minutes of local time to UTC */
+		if (deviation & 0x8000)
+			fprintf(stderr, "deviation is unspecified\n");
+		else
+			fprintf(stderr, "deviation is %04d\n", deviation);
+		status = buf[12];
+		fprintf(stderr, "status is");
+		if (status == 0xff)
+			fprintf(stderr, " not specified\n");
+		else {
+			if (status & 0x01)
+				fprintf(stderr, " invalid");
+			if (status & 0x02)
+				fprintf(stderr, " doubtful");
+			if (status & 0x04)
+				fprintf(stderr, " different");
+			if (status & 0x08)
+				fprintf(stderr, " invalid clock");
+			if (status & 0x80)
+				fprintf(stderr, " daylight saving");
+			if (!status)
+				fprintf(stderr, " OK");
+			fprintf(stderr, "\n");
+		}
+		return buf + 13;
+	default:
+		fprintf(stderr, "Bogus date-time: %d is not a valid length\n", buf[0]);
+		return NULL;
+	}
+}
+
+static int parse_cosem(unsigned char *buf, size_t buflen)
+{
+	int i, len = 1;
+	unsigned int val;
+	unsigned long longval;
+	unsigned long long longlongval;
+
+	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
+	switch (buf[0]) {
+	case 0: // null-data
+		break;
+	case 1: // array
+	case 2: // structure
+		fprintf(stderr, "Parsing %s with %d elements\n", buf[0] == 1 ? "array" : "struct", buf[1]);
+		len += 1;
+		for (i = 0; i < buf[1]; i++)
+			len += parse_cosem(&buf[len], buflen - len);
+		break;
+	case 5: // double-long
+		longval = buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
+		fprintf(stderr, "double-long (%ld)\n", longval);
+		len += 4;
+		break;
+	case 6: // double-long-unsigned
+		longval = buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
+		fprintf(stderr, "double-long-unsigned (%lu)\n", longval);
+		len += 4;
+		break;
+	case 9: // octet-string
+		fprintf(stderr, "octet-string (%d bytes):", buf[1]);
+		for (i = 0; i < buf[1]; i++)
+			fprintf(stderr, " %02x", buf[i + 2]);
+		fprintf(stderr, "\n");
+		len += 1 + buf[1];
+		break;
+	case 10: // visible-string
+		fprintf(stderr, "visible-string (%d bytes): ", buf[1]);
+		for (i = 0; i < buf[1]; i++)
+			fprintf(stderr, "%c", buf[i + 2]);
+		fprintf(stderr, "\n");
+		len += 1 + buf[1];
+		break;
+	case 15: // integer
+		fprintf(stderr, "integer (%d)\n", (char)buf[1]);
+		len += 1;
+		break;
+	case 16: // long
+		val = buf[1] << 8 | buf[2];
+		fprintf(stderr, "long (%d)\n", (int)val);
+		len += 2;
+		break;
+	case 17: // unsigned
+		fprintf(stderr, "unsigned (%d)\n", buf[1]);
+		len += 1;
+		break;
+	case 18: // long-unsigned
+		val = buf[1] << 8 | buf[2];
+		fprintf(stderr, "long-unsigned (%u)\n", val);
+		len += 2;
+		break;
+/*	case 20: // long64
+		longlongval = buf[1] << 56 | buf[2] << 48 | buf[3] << 40 | buf[4] << 32 | buf[5] << 24 | buf[6] << 16 | buf[7] << 8 | buf[8];
+		fprintf(stderr, "long64 (%lld)\n", longlongval);
+		len += 8;
+		break;
+	case 21: // long64-unsigned
+		val = buf[1] << 8 | buf[2];
+		longlongval = buf[1] << 56 | buf[2] << 48 | buf[3] << 40 | buf[4] << 32 | buf[5] << 24 | buf[6] << 16 | buf[7] << 8 | buf[8];
+		fprintf(stderr, "long64-unsigned (%llu)\n", longlongval);
+		len += 8;
+		break;
+*/
+	case 22: // enum
+		fprintf(stderr, "enum (%u)\n", buf[1]);
+		len += 1;
+		break;
+	case 25: // date-time
+		len += 12;
+		break;
+	default:
+		fprintf(stderr, "Unsupported COSEM data type: %d (%02x)\n", buf[0], buf[0]);
+	}
+	if (len > buflen)
+		fprintf(stderr, "Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
+	return len;
+}
+
+static int parse_payload(unsigned char *buf, size_t buflen)
+{
+	unsigned long invokeid;
+	unsigned char *p;
+	struct tm datetime;
+
+	print_packet("*** payload dump: ***\n", buf, buflen);
+
+	/* 
+	 * the first 3 bytes of the payload is LLC:
+	 *   LSAP | DSAP | Quality, fixed to e6 e7 00
+	 */
+	if (buf[0] != 0xe6 || buf[1] != 0xe7 || buf[2] != 0x00) {
+		fprintf(stderr, "Invalid LLC header: %02x %02x %02x\n", buf[0], buf[1], buf[2]);
+		return -1;
+	}
+
+	/*
+	 * then follows a xDLMS APDU with:
+
+	 0F            data-notification [15]
+	 00 00 00 00   long-invoke-id-and-priority
+	 0C 07 E1 0A 14 05 03 3A 1E FF 80 00 00  date-time
+	 02 19 ....    notification-body
+
+	*/
+
+	if (buf[3] != 0x0f) {
+		fprintf(stderr, "xDLMS APDU must be 'data-notification' [15], not [%d], according to IEC 62056-7-5:2017\n", buf[3]);
+		return -1;
+	}
+
+	invokeid = buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7];
+	p = &buf[8];
+	fprintf(stderr, "long-invoke-id-and-priority: %#010lx\n", invokeid);
+
+	/* some buggy firmwares includes a 0x09 type byte before the date-time - skip it */
+	if (p[0] == 0x09)
+		p++;
+
+	p = decode_datetime(p, &datetime);
+	if (!p)
+		return -1;
+
+	fprintf(stderr, "date-time: %s\n", asctime(&datetime));
+
+	parse_cosem(p, buflen + buf - p);
+	return 0;
+}
+
 static int read_and_parse(int fd)
 {
-	char *end, *p, rbuf[512];
-	int rlen, framelen, ret = 0;
-	fd_set rd;
-	struct timeval tv = { .tv_sec = 1, .tv_usec = 0, };
+	unsigned char *payload, *cur, *hdlc, rbuf[512];
+	struct pollfd fds[1];
+	int ret, rlen, framelen = -1;
 
-	FD_ZERO(&rd);
-	FD_SET(fd, &rd);
-	if (select(fd + 1, &rd, NULL, NULL, &tv) <= 0) {
-		fprintf(stderr, "Unexpected: no data to read\n");
-		return 0;
-	}
+	fds[0].fd = fd;
+	fds[0].events = POLLIN;
+	cur = rbuf;
 
-	rlen = read(fd, rbuf, sizeof(rbuf));
-	if (rlen <= 0)
-		return rlen;
-	print_packet("read\n", rbuf, rlen);
+	while (1) {
+		ret = poll(fds, 1, -1);
+		if (ret == -1)
+			return -errno;
 
-	p = rbuf;
-loop:
-	while (rlen > 0 && (end = memchr(p, CONTROL, rlen)) != NULL) {
-		while (*p == CONTROL) {
-			p++;
-			rlen--;
-			if (rlen == 0)
-				return 0;
-			if (p > end)
-				goto loop;
+		if (fds[0].revents & POLLIN)
+			rlen = read(fd, cur, sizeof(rbuf) + rbuf - cur);
+		else
+			rlen = 0;
+
+		if (rlen <= 0)
+			return rlen;
+
+		cur += rlen;
+
+nextframe:
+		/* looking for a new frame? */
+		if (framelen < 0) {
+			hdlc = hdlc_start(rbuf, cur - rbuf);
+
+			/* need enough to verify type and length */
+			if (!hdlc || cur  - hdlc < 3)
+				continue;
+
+			framelen = hdlc_length(hdlc);
+
+			/* drop if invalid */
+			if (framelen < 0)
+				cur = rbuf;
+
+			/* realign if exceeding buf size */
+			if (hdlc + framelen + 2 > rbuf + sizeof(rbuf)) {
+				if (framelen + 2 > sizeof(rbuf)) {
+					fprintf(stderr, "frame too big: %d > %zd - dropping\n", framelen, sizeof(rbuf) - 2);
+					framelen = -1;
+					cur = rbuf;
+				} else { // realign to start of buffer
+					fprintf(stderr, "moving frame to start of buffer to make it fit\n");
+					memmove(rbuf, hdlc, cur - hdlc);
+					cur -= hdlc - rbuf;
+					hdlc = rbuf;
+				}
+			}
 		}
-		framelen = end - p;
 
-		switch (p[0]) {
-		default:
-//			fprintf(stderr, "Unsupported response code: %#04hhx\n", p[0]);
-			parsebuf(p, framelen);
+		/* waiting to complete a frame? */
+		if (framelen > 0 && (cur - hdlc) < (framelen + 2))
+			continue;
+
+		// verify frame
+		payload = hdlc_verify(hdlc, framelen + 2);
+		if (!payload) {
+			print_packet("*** dropping bogus frame: ***\n", hdlc, framelen + 2);
+
+			/* only skip the first CONTROL char in case the real frame starts inside the bogus one */
+			memmove(rbuf, hdlc + 1, cur - hdlc - 1);
+			cur -= hdlc - rbuf + 1;
+			framelen = -1;
+			goto nextframe;
 		}
-		if (ret < 0)
-			return ret;
-		p = end;
-		rlen -= framelen;
+
+		// got a complete frame
+		print_packet("*** frame dump: ***\n", hdlc, framelen + 2);
+		parse_payload(payload, framelen - (payload - hdlc + 1));
+
+		// keep remaining data for next frame, including the stop marker in case it doubles as start of next frame
+		memmove(rbuf, hdlc + framelen + 1, cur - rbuf - framelen + 1);
+		cur -= hdlc - rbuf + framelen + 1;
+		framelen = -1;
+		goto nextframe;
 	}
-	return ret;
+	return 0;
 }
 
 static struct option main_options[] = {
