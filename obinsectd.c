@@ -463,53 +463,18 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 }
 
 /* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.6.1 "Date and time formats" */ 
-static unsigned char *decode_datetime(unsigned char *buf, struct tm *t)
+static time_t decode_datetime(unsigned char *buf)
 {
-	int deviation, status;
+	struct tm t = {};
 
-	memset(t, 0, sizeof(*t));
-	switch (buf[0]) {
-	case 0:
-		return buf + 1;
-	case 12:
-		t->tm_year = (buf[1] << 8 | buf[2]) - 1900; /* POSIX is year - 1900 */
-		t->tm_mon = buf[3] - 1; /* COSEM is 1...12, POSIX is 0..11 */
-		t->tm_mday = buf[4];
-		t->tm_wday = !buf[5] ? 7 : buf[5];  /* COSEM is 1...7, 1 is Monday, POSIX is 0..6, 0 is Sunday */
-		t->tm_hour = buf[6];
-		t->tm_min = buf[7];
-		t->tm_sec = buf[8];
-//		hundredths = buf[9];
-		deviation = buf[10] << 8 | buf[11]; /* range -720...+720 in minutes of local time to UTC */
-/*		if (deviation & 0x8000)
-			fprintf(stderr, "deviation is unspecified\n");
-		else
-			fprintf(stderr, "deviation is %04d\n", deviation);
-		status = buf[12];
-		fprintf(stderr, "status is");
-		if (status == 0xff)
-			fprintf(stderr, " not specified\n");
-		else {
-			if (status & 0x01)
-				fprintf(stderr, " invalid");
-			if (status & 0x02)
-				fprintf(stderr, " doubtful");
-			if (status & 0x04)
-				fprintf(stderr, " different");
-			if (status & 0x08)
-				fprintf(stderr, " invalid clock");
-			if (status & 0x80)
-				fprintf(stderr, " daylight saving");
-			if (!status)
-				fprintf(stderr, " OK");
-			fprintf(stderr, "\n");
-		}
-*/
-		return buf + 13;
-	default:
-		fprintf(stderr, "Bogus date-time: %d is not a valid length\n", buf[0]);
-		return NULL;
-	}
+	t.tm_year = (buf[0] << 8 | buf[1]) - 1900; /* POSIX is year - 1900 */
+	t.tm_mon = buf[2] - 1; /* COSEM is 1...12, POSIX is 0..11 */
+	t.tm_mday = buf[3];
+	t.tm_wday = !buf[4] ? 7 : buf[4];  /* COSEM is 1...7, 1 is Monday, POSIX is 0..6, 0 is Sunday */
+	t.tm_hour = buf[5];
+	t.tm_min = buf[6];
+	t.tm_sec = buf[7];
+	return mktime(&t);
 }
 
 static char *cosem_typestr(unsigned char type)
@@ -665,7 +630,7 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 	int i, len, n;
 	json_object *myobj, *value;
 	char fieldname[32]; /* "double-long-unsigned" is 20 bytes */
-	struct tm datetime;
+	time_t t;
 
 	*ret = NULL;
 
@@ -700,12 +665,12 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 // 		*ret = cosem_object_new(buf, len, value);
 		break;
 	case 5: // double-long
-		len = 1 + 4;
- 		*ret = cosem_object_new_int(buf, len - 1, true);
+		len = 4;
+ 		*ret = cosem_object_new_int(buf, len++, true);
 		break;
 	case 6: // double-long-unsigned
-		len = 1 + 4;
- 		*ret = cosem_object_new_int(buf, len - 1, false);
+		len = 4;
+ 		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 9: // octet-string
 		len = 2 + buf[1];
@@ -714,8 +679,8 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 			*ret = json_object_new_string(fieldname);
 //			*ret = cosem_object_new(buf, len, json_object_new_bytearray(&buf[2], buf[1]));
 		} else if (buf[1] == 12 && buf[2] == 7) { /* works until 2047 */
-			decode_datetime(&buf[1], &datetime);
-			*ret = json_object_new_string(asctime(&datetime));
+			t = decode_datetime(&buf[2]);
+			*ret = json_object_new_string_len(ctime(&t), 24);
 		} else
 			*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
 		break;
@@ -728,37 +693,37 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
  		*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
 		break;
 	case 15: // integer
-		len = 1 + 1;
- 		*ret = cosem_object_new_int(buf, len - 1 , true);
+		len = 1;
+ 		*ret = cosem_object_new_int(buf, len++ , true);
 		break;
 	case 16: // long
-		len = 1 + 2;
- 		*ret = cosem_object_new_int(buf, len - 1, true);
+		len = 2;
+ 		*ret = cosem_object_new_int(buf, len++, true);
 		break;
 	case 17: // unsigned
-		len = 1 + 1;
- 		*ret = cosem_object_new_int(buf, len - 1, false);
+		len = 1;
+ 		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 18: // long-unsigned
-		len = 1 + 2;
- 		*ret = cosem_object_new_int(buf, len - 1, false);
+		len = 2;
+ 		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 20: // long64
-		len = 1 + 8;
- 		*ret = cosem_object_new_int(buf, len - 1, true);
+		len = 8;
+ 		*ret = cosem_object_new_int(buf, len++, true);
 		break;
 	case 21: // long64-unsigned
-		len = 1 + 8;
- 		*ret = cosem_object_new_int(buf, len - 1, false);
+		len = 8;
+ 		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 22: // enum
-		len = 1 + 1;
- 		*ret = cosem_object_new_int(buf, len - 1, false);
+		len = 1;
+ 		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 25: // date-time
 		len = 1 + 12;
- 		*ret = NULL;
-		break;
+		*ret = json_object_new_int(decode_datetime(&buf[1]));
+ 		break;
 	default:
 		fprintf(stderr, "ERROR: Unsupported COSEM data type: %d (%02x)\n", buf[0], buf[0]);
 	}
@@ -771,7 +736,7 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 {
 	unsigned long invokeid;
 	unsigned char *p;
-	struct tm datetime;
+	time_t t;
 	int i;
 	json_object *myobj, *foo, *bar;
 	bool datetime_bug = false;
@@ -819,9 +784,9 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 		printf("%02x", p[i + 1]);
 	printf("\n");
 */
-	p = decode_datetime(p, &datetime);
-	if (!p)
-		return -1;
+	if (p[0] == 12)
+		t = decode_datetime(&p[1]);
+	p += p[0] + 1;
 
 //	fprintf(stderr, "date-time: %s\n", asctime(&datetime));
 
@@ -839,8 +804,8 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 	json_object_object_add(foo, "long-invoke-id-and-priority", json_object_new_int(invokeid));
 	if (datetime_bug)
 		json_object_object_add(foo, "date-time-bug", json_object_new_boolean(true));
-	if (datetime.tm_year)
-		json_object_object_add(foo, "date-time", json_object_new_int(mktime(&datetime)));
+	if (t)
+		json_object_object_add(foo, "date-time", json_object_new_int(t));
 
 	parse_cosem(p, buflen + buf - p, 0, &bar);
 	json_object_object_add(foo, "notification-body", bar);
