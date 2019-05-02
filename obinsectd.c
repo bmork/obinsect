@@ -817,6 +817,7 @@ static json_object *cosem_new_obis(unsigned char *obis)
 // guessing OBIS code if length is 6 and value is a.b.x.x.x.255 where a and b are 0 or 1
 static bool is_obis(unsigned char *code)
 {
+	return true;
 	if (buf[0] != 9 || buf[1] != 6 || buf[2] > 1 || buf[3] > 1 || buf[7] != 255)
 		return false;
 	return true;
