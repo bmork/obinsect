@@ -182,78 +182,6 @@ static int serial_open(const char *dev)
 	return fd;
 }
 
-struct hdlc_header {
-	__uint8_t format;
-	__uint16_t len;
-	__uint32_t src, dst;
-	__uint8_t control;
-	__uint16_t hcs;             // check sequence from byte 1-6 (1byte addrs) - inkluderer 0x7E !! */
-	__uint8_t ssap, dsap, llcq; /* format identifier, group identifier, group length
-				       i følge https://library.iugaza.edu.ps/thesis/121838.pdf
-				       Følges av "group length" antall bytes! */
-
-
-};
-
-struct obistime {
-	__uint16_t year;
-	__uint8_t month,day, weekday, hour, min, sec;
-	__uint8_t unknown;
-	__uint8_t deviation;
-	__uint16_t status;
-};
-
-struct dlms {
-	__uint8_t tag;
-	__uint32_t id_and_priority;
-	__uint8_t timelen;
-	struct obistime time;
-};
-
-#define MAXPL 20
-struct cosemlist {
-	struct hdlc_header hdlc;
-	struct dlms apdu;
-	int n_obis;
-//	struct obis payload[MAXPL];
-	__uint16_t fcs;
-};
-
-/* addr is variable length 1 - 4 bytes, terminated by LSB == 1 */
-static int getaddr(const char *p, __uint32_t *addr)
-{
-	__uint32_t tmp = 0;
-	int len = 0;
-
-	while (len < 4 && !(p[len] & 0x01)) {
-			tmp <<= 8;
-			tmp |= p[len];
-			len ++;
-	}
-	*addr = tmp;
-	return len;
-}
-
-/*
-static inline __uint8_t pull8(char **p)
-{
-	__uint8_t tmp = *p++[0];
-	return tmp;
-}
-
-static inline __uint16_t pull16(char **p)
-{
-	__uint16_t tmp = *p++[0] << 8 | *p++[1];
-	return tmp;
-}
-
-static inline __uint32_t pull32(char **p)
-{
-	__uint32_t tmp = *p++[0] << 24 | *p++[1] << 16 |  *p++[2] << 8 | *p++[3];
-	return tmp;
-}
-
-*/
 
 /* 
  * See /usr/local/src/git/AmsToMqttBridge/Samples/Kaifa/readme.md for docs!
@@ -452,52 +380,6 @@ static unsigned char *parse_hdlc_header(unsigned char *p, size_t *len)
 	*len -= 7 + i;
 	return &p[7 + i];
 }
-
-static int parsebuf(unsigned char *buf, size_t buflen)
-{
-	unsigned char *p = buf;
-	size_t len = buflen;
-
-	/* 1. parse HDLC header */
-	p = parse_hdlc_header(p, &len);
-	return len;
-}
-/*
-	cosem->hdlc.format = p[0] >> 4;
-	cosem->hdlc.len = p[0] & 0xf | p[1];
-	&cosem->hdlc.src = p[2];
-	p += 3;
-	p += getaddr(p, &cosem->hdlc.dst);
-	cosem->hdlc.control = *p++;
-	cosem->hdlc.hcs = *p++ << 8 | *p++;
-	cosem->hdlc.ssap = *p++;
-	cosem->hdlc.dsap = *p++;
-	cosem->hdlc.llcq = *p++;
-
-	cosem->apdu.tag = *p++;
-	cosem->apdu.id_and_priority = pull32(&p);
-	cosem->apdu.timelen = *p++;
-
-	// a 09 type byte is sometimes included - the timelen must be either 12 or 0
-	if (cosem->apdu.timelen == 0x09)
-		cosem->apdu.timelen = *p++;
-
-	if (cosem->apdu.timelen) {
-		cosem->apdu.time.year = pull16(&p);
-		cosem->apdu.time.month = pull8(&p);
-		cosem->apdu.time.day = pull8(&p);
-		cosem->apdu.time.weekday = pull8(&p);
-		cosem->apdu.time.hour = pull8(&p);
-		cosem->apdu.time.min = pull8(&p);
-		cosem->apdu.time.sec = pull8(&p);
-		cosem->apdu.time.unknown = pull8(&p);
-		cosem->apdu.time.deviation = pull8(&p);
-		cosem->apdu.time.status = pull16(&p);
-	}
-
-	// FIXME: OBIS decoding (variable format!) 
-}
-*/
 
 /* read states:
  - framelen < 0:  look for CONTROL
@@ -899,7 +781,7 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 	case 9: // octet-string
 		len = 2 + buf[1];
 		if (is_obis(buf)) {
-			sprintf(fieldname, "%u.%u.%u.%u.%u.%u", buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+			sprintf(fieldname, "%u-%u:%u.%u.%u.%u", buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 			*ret = cosem_object_new(buf, len, json_object_new_string(fieldname));
 //			*ret = cosem_object_new(buf, len, json_object_new_bytearray(&buf[2], buf[1]));
 		} else if (buf[1] == 12 && buf[2] == 7) { /* works until 2047 */
@@ -963,6 +845,7 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 	struct tm datetime;
 	int i;
 	json_object *myobj, *foo, *bar;
+	bool datetime_bug = false;
 
 //	print_packet("*** payload dump: ***\n", buf, buflen);
 
@@ -997,8 +880,10 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 
 //	printf("%02x %08x", buf[3], htobe32(invokeid));
 	/* some buggy firmwares includes a 0x09 type byte before the date-time - skip it */
-	if (p[0] == 0x09)
+	if (p[0] == 0x09) {
+		datetime_bug = true;
 		p++;
+	}
 
 /*	printf(" %02x ", p[0]);
 	for (i = 0; i < p[0]; i++)
@@ -1023,6 +908,8 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 	foo = json_object_new_object();
 	json_object_object_add(myobj, "data-notification",  foo);
 	json_object_object_add(foo, "long-invoke-id-and-priority", json_object_new_int(invokeid));
+	if (datetime_bug)
+		json_object_object_add(foo, "date-time-bug", json_object_new_boolean(true));
 	if (datetime.tm_year)
 		json_object_object_add(foo, "date-time", json_object_new_int(mktime(&datetime)));
 
