@@ -670,126 +670,266 @@ static unsigned char *decode_datetime(unsigned char *buf, struct tm *t)
 	}
 }
 
+static char *cosem_typestr(unsigned char type)
+{
+	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
+	switch (type) {
+	case 0: return "null-data";
+	case 1: return "array";
+	case 2: return "structure";
+	case 3: return "boolean";
+	case 4: return "bit-string";
+	case 5: return "double-long";
+	case 6: return "double-long-unsigned";
+     /* case 7: return “floating-point”; // not usable in DLMS/COSEM. */
+	case 9: return "octet-string";
+	case 10: return "visible-string";
+     /* case 11: return “time”; // not usable in DLMS/COSEM. */
+	case 12: return "utf8-string";
+	case 13: return "bcd";
+	case 15: return "integer";
+	case 16: return "long";
+	case 17: return "unsigned";
+	case 18: return "long-unsigned";
+	case 20: return "long64";
+	case 21: return "long64-unsigned";
+	case 22: return "enum";
+	case 23: return "float32";
+	case 24: return "float64";
+	case 25: return "date-time";
+	case 26: return "date";
+	case 27: return "time";
+	default: return "unknown";
+	}
+}
+
+/* 
+ * cosem_variable_len() returns true if the type stores its length in the second byte
+ *
+ * NOTE: the length is not necessarily octects, for example for arrays
+ * (number of elements) and structs (number of fields)
+ */
+static bool cosem_variable_len(unsigned char type)
+{
+	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
+	switch (type) {
+	case 1:
+	case 2:
+     /* case 4: - who knows? */
+	case 9:
+	case 10:
+	case 12:
+     /* case 13: - who knows? */
+		return true;
+	default:
+		return false;
+	}
+}
+
+static json_object *cosem_object_new(unsigned char *raw, size_t rawlen, json_object *value)
+{
+	json_object *ret = json_object_new_object();
+
+	if (!ret)
+		return NULL;
+//	json_object_object_add(ret, "raw", json_object_new_string_len((char *)raw, rawlen));
+	json_object_object_add(ret, "cosem_type", json_object_new_int(raw[0]));
+	json_object_object_add(ret, "cosem_typestr", json_object_new_string(cosem_typestr(raw[0])));
+	if (cosem_variable_len(raw[0]))
+		json_object_object_add(ret, "cosem_length", json_object_new_int(raw[1]));
+	if (value)
+		json_object_object_add(ret, "cosem_value", value);
+	return ret;
+}
+
+static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool sign)
+{
+	__uint32_t hi, lo;
+
+	switch (intlen) {
+	case 1:
+		lo = raw[1];
+		break;
+	case 2:
+		lo = raw[1] << 8 | raw[2];
+		break;
+	case 4:
+		lo = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
+		break;
+	case 8:
+		hi = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
+		lo = raw[5] << 24 | raw[6] << 16 | raw[7] << 8 | raw[8];
+		return json_object_new_int64(sign ? (__int64_t)hi << 32 | lo : (__uint64_t)hi << 32 | lo);
+	}
+	return json_object_new_int(sign ? (__int32_t)lo : lo);
+}
+
+/*
+static json_object *cosem_new_obis(unsigned char *obis)
+{
+	// F can only be 255
+	if (obis[5] != 255)
+		return NULL;
+	// this is special - the only code where B != 0
+	if (obis[0] == 1 && obis[1] == 1 && obis[2] == 0 && obis[3] == 2 && obis[4] == 129) {
+		// 1.1.0.2.129.255 -  OBIS list version identifier
+	}
+	// B can only be 0, with the above exception
+	if (obis[1] != 0)
+		return NULL;
+
+	switch (obis[0]) { // A
+	case 0:
+		switch (obis[2]) { // C
+		case 1:
+			if (obis[3] != 0 || obis[4] != 0 ) // D and E
+				return NULL;
+			// 0.0.1.0.0.255 - Clock and date in meter
+			break;
+		case 96:
+			if (obis[3] != 1) // D
+				return NULL;
+			switch (obis[4]) { // E
+			case 0:
+				// 0.0.96.1.0 - Meter -ID
+				break;
+			case 7:
+				// 0.0.96.1.7 -Meter type
+				break;
+			default: return NULL;
+			}
+			break;
+		default: return NULL;
+		}
+		break;
+	case 1:
+		switch (obis[1]) { // B
+		case 0:
+		case 1:
+		default: return NULL;
+		}
+		break;
+	default: return NULL;
+	}
+}
+*/
+
+// guessing OBIS code if length is 6 and value is a.b.x.x.x.255 where a and b are 0 or 1
+static bool is_obis(unsigned char *code)
+{
+	if (buf[0] != 9 || buf[1] != 6 || buf[2] > 1 || buf[3] > 1 || buf[7] != 255)
+		return false;
+	return true;
+}
+
+
+static json_object *json_object_new_bytearray(unsigned char *raw, size_t len)
+{
+	json_object *ret = json_object_new_array();
+	int i;
+
+	for (i = 0; i < len; i++)
+		json_object_array_add(ret, json_object_new_int(raw[i]));
+	return ret;
+}
+
+/* parse_cosem() returns the number of eaten bytes, as well as a JSON object in ret */
 static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object **ret)
 {
-	int i, len = 1;
-	unsigned int val;
-	unsigned long longval;
-	unsigned long long longlongval;
-	json_object *myobj;
+	int i, len, n;
+	json_object *myobj, *value;
+	char fieldname[32]; /* "double-long-unsigned" is 20 bytes */
 
 	*ret = NULL;
-	for (i = 0; i < lvl; i++)
-		printf("  ");
 
 	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
 	switch (buf[0]) {
 	case 0: // null-data
+		len = 1;
+		*ret = cosem_object_new(buf, len, NULL);
 		break;
 	case 1: // array
-	case 2: // structure
-		*ret = json_object_new_array();
-		printf("%02x%02x\n", buf[0], buf[1]);
-		fprintf(stderr, "Parsing %s with %d elements\n", buf[0] == 1 ? "array" : "struct", buf[1]);
-		len += 1;
+		value = json_object_new_array();
+		len = 2;
 		for (i = 0; i < buf[1]; i++) {
-			len += parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
-			if (myobj)
-				json_object_array_add(*ret, myobj);
+			n = parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
+			json_object_array_add(value, cosem_object_new(&buf[len], n, myobj));
+			len += n;
 		}
+ 		*ret = cosem_object_new(buf, len, value);
+		break;
+	case 2: // structure
+		value = json_object_new_object();
+		len = 2;
+		for (i = 0; i < buf[1]; i++) {
+			n = parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
+			sprintf(fieldname, "%03u-%s", i, cosem_typestr(buf[len]));
+			json_object_object_add(value, fieldname, myobj);
+			len += n;
+		}
+ 		*ret = cosem_object_new(buf, len, value);
 		break;
 	case 5: // double-long
-		longval = buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
-		*ret = json_object_new_int(longval);
-		fprintf(stderr, " (%ld)\n", longval);
-		printf("%02x %08x\n", buf[0], htobe32(longval));
-		len += 4;
+		len = 1 + 4;
+ 		*ret = cosem_object_new(buf, 5, cosem_object_new_int(buf, len - 1, true));
 		break;
 	case 6: // double-long-unsigned
-		longval = buf[1] << 24 | buf[2] << 16 | buf[3] << 8 | buf[4];
-		*ret = json_object_new_int(longval);
-		fprintf(stderr, "double-long-unsigned (%lu)\n", longval);
-		printf("%02x %08x\n", buf[0], htobe32(longval));
-		len += 4;
+		len = 1 + 4;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, false));
 		break;
 	case 9: // octet-string
-		fprintf(stderr, "octet-string (%d bytes):", buf[1]);
-		for (i = 0; i < buf[1]; i++)
-			fprintf(stderr, " %02x", buf[i + 2]);
-		fprintf(stderr, "\n");
-		printf("%02x%02x ", buf[0], buf[1]);
-		for (i = 0; i < buf[1]; i++)
-			printf("%02x", buf[i + 2]);
-		printf("\n");
-		len += 1 + buf[1];
+		len = 2 + buf[1];
+		if (is_obis(buf))
+			*ret = cosem_object_new(buf, len, json_object_new_bytearray(&buf[2], buf[1]));
+		else
+			*ret = cosem_object_new(buf, len, json_object_new_string_len((char *)&buf[2], buf[1]));
 		break;
 	case 10: // visible-string
-		fprintf(stderr, "visible-string (%d bytes): ", buf[1]);
-		for (i = 0; i < buf[1]; i++)
-			fprintf(stderr, "%c", buf[i + 2]);
-		fprintf(stderr, "\n");
-		printf("%02x%02x ", buf[0], buf[1]);
-		for (i = 0; i < buf[1]; i++)
-			printf("%02x", buf[i + 2]);
-		printf("\n");
-		len += 1 + buf[1];
+		len = 2 + buf[1];
+ 		*ret = cosem_object_new(buf, len, json_object_new_string_len((char *)&buf[2], buf[1]));
+		break;
+	case 12: // utf8-string
+		len = 2 + buf[1];
+ 		*ret = cosem_object_new(buf, len, json_object_new_string_len((char *)&buf[2], buf[1]));
 		break;
 	case 15: // integer
-		*ret = json_object_new_int(buf[1]);
-		fprintf(stderr, "integer (%d)\n", (char)buf[1]);
-		printf("%02x %02x\n", buf[0], buf[1]);
-		len += 1;
+		len = 1 + 1;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1 , true));
 		break;
 	case 16: // long
-		val = buf[1] << 8 | buf[2];
-		*ret = json_object_new_int(val);
-		fprintf(stderr, "long (%d)\n", (int)val);
-		printf("%02x %04x\n", buf[0], htobe16(val));
-		len += 2;
+		len = 1 + 2;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, true));
 		break;
 	case 17: // unsigned
-		*ret = json_object_new_int(buf[1]);
-		fprintf(stderr, "unsigned (%d)\n", buf[1]);
-		printf("%02x %02x\n", buf[0], buf[1]);
-		len += 1;
+		len = 1 + 1;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, false));
 		break;
 	case 18: // long-unsigned
-		val = buf[1] << 8 | buf[2];
-		*ret = json_object_new_int(val);
-		fprintf(stderr, "long-unsigned (%u)\n", val);
-		printf("%02x %04x\n", buf[0], htobe16(val));
-		len += 2;
+		len = 1 + 2;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, false));
 		break;
-/*	case 20: // long64
-		longlongval = buf[1] << 56 | buf[2] << 48 | buf[3] << 40 | buf[4] << 32 | buf[5] << 24 | buf[6] << 16 | buf[7] << 8 | buf[8];
-		fprintf(stderr, "long64 (%lld)\n", longlongval);
-		len += 8;
+	case 20: // long64
+		len = 1 + 8;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, true));
 		break;
 	case 21: // long64-unsigned
-		val = buf[1] << 8 | buf[2];
-		longlongval = buf[1] << 56 | buf[2] << 48 | buf[3] << 40 | buf[4] << 32 | buf[5] << 24 | buf[6] << 16 | buf[7] << 8 | buf[8];
-		fprintf(stderr, "long64-unsigned (%llu)\n", longlongval);
-		len += 8;
+		len = 1 + 8;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, false));
 		break;
-*/
 	case 22: // enum
-		*ret = json_object_new_int(buf[1]);
-		fprintf(stderr, "enum (%u)\n", buf[1]);
-		printf("%02x %02x\n", buf[0], buf[1]);
-		len += 1;
+		len = 1 + 1;
+ 		*ret = cosem_object_new(buf, len, cosem_object_new_int(buf, len - 1, false));
 		break;
 	case 25: // date-time
-		printf("%02x ", buf[0]);
-		for (i = 1; i <= 12; i++)
-			printf("%02x", buf[i]);
-		printf("\n");
-		len += 12;
+		len = 1 + 12;
+ 		*ret = cosem_object_new(buf, len, NULL);
 		break;
 	default:
 		fprintf(stderr, "Unsupported COSEM data type: %d (%02x)\n", buf[0], buf[0]);
 	}
 	if (len > buflen)
 		fprintf(stderr, "Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
+	fprintf(stderr, "returning %d for type %u\n", len, buf[0]);
 	return len;
 }
 
@@ -850,7 +990,8 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 
 	parse_cosem(p, buflen + buf - p, 0, &myobj);
 
-	fprintf(stderr, "JSON: %s\n", json_object_get_string(myobj));
+	fprintf(stderr, "JSON: %s\n", json_object_to_json_string_ext(myobj, JSON_C_TO_STRING_PRETTY));
+//	fprintf(stderr, "JSON: %s\n", json_object_get_string(myobj));
 	return 0;
 }
 
