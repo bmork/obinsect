@@ -112,59 +112,6 @@ static __uint16_t crc16(const char *buffer, size_t len)
 }
 
 #define CONTROL 0x7e
-#define ESCAPE  0x7d
-#define MASK    0x20
-
-static size_t unescape(const char *in, size_t inlen, char *out, size_t outlen)
-{
-	size_t i, j = 0;
-	bool escaping = false;
-
-	for (i = 0; i < inlen; i++) {
-		if (j >= outlen) {
-			debug("i=%zu, j=%zu, inlen=%zu, outlen=%zu\n", i, j, inlen, outlen);
-			return 0;
-		}
-		if (escaping) {
-			out[j++] = in[i] ^ MASK;
-			escaping = false;
-		} else if (in[i] == ESCAPE) {
-			escaping = true;
-		} else {
-			out[j++] = in[i];
-		}
-	}
-	return j;
-}
-
-static size_t hdlc_unframe(const char *in, size_t inlen, char *out, size_t outlen)
-{
-    __uint16_t crc;
-    size_t j, i = inlen;
-
-    /* the first control char is optional */
-    if (*in == CONTROL) {
-	    in++;
-	    i--;
-    }
-    if (in[i - 1] == CONTROL)
-	    i--;
-
-    j = unescape(in, i, out, outlen);
-    if (j < 2) {
-	    debug("unescape failed: j = %zu\n", j);
-	    return 0;
-    }
-    j -= 2; /* remove the crc */
-
-    /* verify the crc */
-    crc = crc16(out, j);
-    if (crc != ((unsigned char)out[j] | (unsigned char)out[j + 1] << 8)) {
-	    debug("crc failed: 0x%04x != 0x%04x\n", crc, out[j] | out[j + 1] << 8);
-	    return 0;
-    }
-    return j;
-}
 
 static int serial_open(const char *dev)
 {
