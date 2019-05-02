@@ -548,9 +548,12 @@ static const char *hdlc_control(unsigned char control)
 	return buf;
 }
 
-static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
+static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object **hdlc)
 {
 	int i, j, format, segmentation, length, src, dst, control, hcs, fcs, check;
+	json_object *tmp;
+
+	*hdlc = json_object_new_object();
 
 	/* check start and stop markers */
 	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL)
@@ -562,21 +565,25 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
 		fprintf(stderr, "DLMS/COSEM requires HDLC frame format \"type 3\" - %#04x is invalid\n", format);
 		return NULL;
 	}
+	json_object_object_add(*hdlc, "format",  json_object_new_int(format));
 
 	segmentation = !!(buf[1] & 0x08);
 	if (segmentation) {
 		fprintf(stderr, "Segmentation is not supported\n");
 		return NULL;
 	}
+	json_object_object_add(*hdlc, "segmentation", json_object_new_boolean(segmentation));
 
 	length = hdlc_length(buf);
 	if (length != buflen - 2) {
 		fprintf(stderr, "Invalid HDLC frame length: %d != %zd\n", length, buflen - 2);
 		return NULL;
 	}
+	json_object_object_add(*hdlc, "length", json_object_new_int(length));
 
 	/* src address is always 1 byte */
 	src = buf[3];
+	json_object_object_add(*hdlc, "src", json_object_new_int(src));
 
 	/* dst address is 1, 2 or 4 bytes */
 	dst = 0;
@@ -586,6 +593,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
 		if (dst & 1)
 			break;
 	}
+	json_object_object_add(*hdlc, "dst", json_object_new_int(dst));
 
 	if (i == 3) {
 		fprintf(stderr, "Bogus HDLC destination address - 3 bytes?: %02x %02x %02x\n", buf[4], buf[5], buf[6]);
@@ -593,12 +601,15 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
 	}
 
 	control = buf[5 + i];
+	json_object_object_add(*hdlc, "control", json_object_new_int(control));
+
 	hcs = buf[7 + i] << 8 | buf[6 + i];
 	check = crc16((char *)(buf + 1), 5 + i);
 	if (hcs != check) {
 		fprintf(stderr, "Bogus HDLC header checksum: %#06x != %#06x\n", hcs, check);
 		return NULL;
 	}
+	json_object_object_add(*hdlc, "hcs", json_object_new_int(hcs));
 
 	/* This will be the HCS, and therefore redundant, in case of an empty payload */
 	fcs = buf[buflen-2] << 8 | buf[buflen-3];
@@ -607,16 +618,17 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen)
 		fprintf(stderr, "Bogus HDLC frame checksum: %#06x != %#06x\n", fcs, check);
 		return NULL;
 	}
+	json_object_object_add(*hdlc, "fcs", json_object_new_int(fcs));
 
 	/* debug dump */
-	fprintf(stderr, "Valid HDLC frame from %d to %d with control=%#04x (%s)\n", src, dst, control, hdlc_control(control) );
+//	fprintf(stderr, "Valid HDLC frame from %d to %d with control=%#04x (%s)\n", src, dst, control, hdlc_control(control) );
 
 	/* dump HDLC header */
-	printf("%02x %04x %02x ", CONTROL, 0xa000 | length, src);
+/*	printf("%02x %04x %02x ", CONTROL, 0xa000 | length, src);
 	for (j = i; j >= 0; j--)
 		printf("%02x", (dst >> (8 * j)) & 0xff);
 	printf(" %02x %04x", control, htobe16(hcs));
-
+*/
 	/* payload starts after header */
 	return &buf[8 + i];
 }
@@ -640,7 +652,7 @@ static unsigned char *decode_datetime(unsigned char *buf, struct tm *t)
 		t->tm_sec = buf[8];
 //		hundredths = buf[9];
 		deviation = buf[10] << 8 | buf[11]; /* range -720...+720 in minutes of local time to UTC */
-		if (deviation & 0x8000)
+/*		if (deviation & 0x8000)
 			fprintf(stderr, "deviation is unspecified\n");
 		else
 			fprintf(stderr, "deviation is %04d\n", deviation);
@@ -663,6 +675,7 @@ static unsigned char *decode_datetime(unsigned char *buf, struct tm *t)
 				fprintf(stderr, " OK");
 			fprintf(stderr, "\n");
 		}
+*/
 		return buf + 13;
 	default:
 		fprintf(stderr, "Bogus date-time: %d is not a valid length\n", buf[0]);
@@ -703,6 +716,14 @@ static char *cosem_typestr(unsigned char type)
 	}
 }
 
+// guessing OBIS code if length is 6 and value is a.b.x.x.x.255 where a and b are 0 or 1
+static bool is_obis(unsigned char *code)
+{
+	if (code[0] != 9 || code[1] != 6 || code[2] > 1 || code[3] > 1 || code[7] != 255)
+		return false;
+	return true;
+}
+
 /* 
  * cosem_variable_len() returns true if the type stores its length in the second byte
  *
@@ -730,15 +751,17 @@ static json_object *cosem_object_new(unsigned char *raw, size_t rawlen, json_obj
 {
 	json_object *ret = json_object_new_object();
 
+	return value;
 	if (!ret)
 		return NULL;
 //	json_object_object_add(ret, "raw", json_object_new_string_len((char *)raw, rawlen));
-	json_object_object_add(ret, "cosem_type", json_object_new_int(raw[0]));
-	json_object_object_add(ret, "cosem_typestr", json_object_new_string(cosem_typestr(raw[0])));
-	if (cosem_variable_len(raw[0]))
-		json_object_object_add(ret, "cosem_length", json_object_new_int(raw[1]));
-	if (value)
-		json_object_object_add(ret, "cosem_value", value);
+//	json_object_object_add(ret, "type", json_object_new_int(raw[0]));
+//	json_object_object_add(ret, "type", json_object_new_string(cosem_typestr(raw[0])));
+//	if (cosem_variable_len(raw[0]))
+//		json_object_object_add(ret, "length", json_object_new_int(raw[1]));
+//	if (value)
+//		json_object_object_add(ret, "value", value);
+	json_object_object_add(ret, is_obis(raw) ? "obis" : cosem_typestr(raw[0]), value);
 	return ret;
 }
 
@@ -814,15 +837,6 @@ static json_object *cosem_new_obis(unsigned char *obis)
 }
 */
 
-// guessing OBIS code if length is 6 and value is a.b.x.x.x.255 where a and b are 0 or 1
-static bool is_obis(unsigned char *code)
-{
-	return true;
-	if (buf[0] != 9 || buf[1] != 6 || buf[2] > 1 || buf[3] > 1 || buf[7] != 255)
-		return false;
-	return true;
-}
-
 
 static json_object *json_object_new_bytearray(unsigned char *raw, size_t len)
 {
@@ -840,6 +854,7 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 	int i, len, n;
 	json_object *myobj, *value;
 	char fieldname[32]; /* "double-long-unsigned" is 20 bytes */
+	struct tm datetime;
 
 	*ret = NULL;
 
@@ -860,15 +875,18 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
  		*ret = cosem_object_new(buf, len, value);
 		break;
 	case 2: // structure
-		value = json_object_new_object();
+//		value = json_object_new_object();
+		*ret = json_object_new_object();
 		len = 2;
 		for (i = 0; i < buf[1]; i++) {
 			n = parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
-			sprintf(fieldname, "%03u-%s", i, cosem_typestr(buf[len]));
-			json_object_object_add(value, fieldname, myobj);
+//			sprintf(fieldname, "%03u-%s", i, cosem_typestr(buf[len]));
+			sprintf(fieldname, "%s-%u", is_obis(&buf[len]) ? "obis" : cosem_typestr(buf[len]), i);
+//			json_object_object_add(value, fieldname, myobj);
+			json_object_object_add(*ret, fieldname, myobj);
 			len += n;
 		}
- 		*ret = cosem_object_new(buf, len, value);
+// 		*ret = cosem_object_new(buf, len, value);
 		break;
 	case 5: // double-long
 		len = 1 + 4;
@@ -880,9 +898,14 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 		break;
 	case 9: // octet-string
 		len = 2 + buf[1];
-		if (is_obis(buf))
-			*ret = cosem_object_new(buf, len, json_object_new_bytearray(&buf[2], buf[1]));
-		else
+		if (is_obis(buf)) {
+			sprintf(fieldname, "%u.%u.%u.%u.%u.%u", buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+			*ret = cosem_object_new(buf, len, json_object_new_string(fieldname));
+//			*ret = cosem_object_new(buf, len, json_object_new_bytearray(&buf[2], buf[1]));
+		} else if (buf[1] == 12 && buf[2] == 7) { /* works until 2047 */
+			decode_datetime(&buf[1], &datetime);
+			*ret = cosem_object_new(buf, len, json_object_new_string(asctime(&datetime)));
+		} else
 			*ret = cosem_object_new(buf, len, json_object_new_string_len((char *)&buf[2], buf[1]));
 		break;
 	case 10: // visible-string
@@ -930,19 +953,18 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 	}
 	if (len > buflen)
 		fprintf(stderr, "Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
-	fprintf(stderr, "returning %d for type %u\n", len, buf[0]);
 	return len;
 }
 
-static int parse_payload(unsigned char *buf, size_t buflen)
+static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 {
 	unsigned long invokeid;
 	unsigned char *p;
 	struct tm datetime;
 	int i;
-	json_object *myobj;
+	json_object *myobj, *foo, *bar;
 
-	print_packet("*** payload dump: ***\n", buf, buflen);
+//	print_packet("*** payload dump: ***\n", buf, buflen);
 
 	/* 
 	 * the first 3 bytes of the payload is LLC:
@@ -953,7 +975,7 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 		return -1;
 	}
 
-	printf(" %02x%02x%02x\n", buf[0], buf[1], buf[2]);
+//	printf(" %02x%02x%02x\n", buf[0], buf[1], buf[2]);
 	/*
 	 * then follows a xDLMS APDU with:
 
@@ -971,25 +993,41 @@ static int parse_payload(unsigned char *buf, size_t buflen)
 
 	invokeid = buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7];
 	p = &buf[8];
-	fprintf(stderr, "long-invoke-id-and-priority: %#010lx\n", invokeid);
+//	fprintf(stderr, "long-invoke-id-and-priority: %#010lx\n", invokeid);
 
-	printf("%02x %08x", buf[3], htobe32(invokeid));
+//	printf("%02x %08x", buf[3], htobe32(invokeid));
 	/* some buggy firmwares includes a 0x09 type byte before the date-time - skip it */
 	if (p[0] == 0x09)
 		p++;
 
-	printf(" %02x ", p[0]);
+/*	printf(" %02x ", p[0]);
 	for (i = 0; i < p[0]; i++)
 		printf("%02x", p[i + 1]);
 	printf("\n");
-
+*/
 	p = decode_datetime(p, &datetime);
 	if (!p)
 		return -1;
 
-	fprintf(stderr, "date-time: %s\n", asctime(&datetime));
+//	fprintf(stderr, "date-time: %s\n", asctime(&datetime));
 
-	parse_cosem(p, buflen + buf - p, 0, &myobj);
+
+	myobj = json_object_new_object();
+	json_object_object_add(myobj, "hdlc",  hdlc);
+	foo = json_object_new_object();
+	json_object_object_add(myobj, "llc",  foo);
+	json_object_object_add(foo, "lsap",  json_object_new_int(0xe6));
+	json_object_object_add(foo, "dsap",  json_object_new_int(0xe7));
+	json_object_object_add(foo, "quality",  json_object_new_int(0x00));
+
+	foo = json_object_new_object();
+	json_object_object_add(myobj, "data-notification",  foo);
+	json_object_object_add(foo, "long-invoke-id-and-priority", json_object_new_int(invokeid));
+	if (datetime.tm_year)
+		json_object_object_add(foo, "date-time", json_object_new_int(mktime(&datetime)));
+
+	parse_cosem(p, buflen + buf - p, 0, &bar);
+	json_object_object_add(foo, "notification-body", bar);
 
 	fprintf(stderr, "JSON: %s\n", json_object_to_json_string_ext(myobj, JSON_C_TO_STRING_PRETTY));
 //	fprintf(stderr, "JSON: %s\n", json_object_get_string(myobj));
@@ -1001,6 +1039,7 @@ static int read_and_parse(int fd)
 	unsigned char *payload, *cur, *hdlc, rbuf[512];
 	struct pollfd fds[1];
 	int ret, rlen, framelen = -1;
+	json_object *hdlc_json;
 
 	fds[0].fd = fd;
 	fds[0].events = POLLIN;
@@ -1056,7 +1095,7 @@ nextframe:
 			continue;
 
 		// verify frame
-		payload = hdlc_verify(hdlc, framelen + 2);
+		payload = hdlc_verify(hdlc, framelen + 2, &hdlc_json);
 		if (!payload) {
 			print_packet("*** dropping bogus frame: ***\n", hdlc, framelen + 2);
 
@@ -1068,11 +1107,11 @@ nextframe:
 		}
 
 		// got a complete frame
-		print_packet("*** frame dump: ***\n", hdlc, framelen + 2);
-		parse_payload(payload, framelen - (payload - hdlc + 1));
+//		print_packet("*** frame dump: ***\n", hdlc, framelen + 2);
+		parse_payload(payload, framelen - (payload - hdlc + 1), hdlc_json);
 
 		// print HDLC trailer
-		printf("%02x%02x %02x\n\n", hdlc[framelen - 1], hdlc[framelen], CONTROL);
+//		printf("%02x%02x %02x\n\n", hdlc[framelen - 1], hdlc[framelen], CONTROL);
 
 		// keep remaining data for next frame, including the stop marker in case it doubles as start of next frame
 		memmove(rbuf, hdlc + framelen + 1, cur - rbuf - framelen + 1);
