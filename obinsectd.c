@@ -650,11 +650,11 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 	unsigned long invokeid;
 	unsigned char *p;
 	time_t t;
-	json_object *tmp;
+	json_object *tmp, *body;
 	bool datetime_bug = false;
 
 	/* add LLC field */
-	json_object_object_add(json, "hdlc", parse_llc(buf, buflen));
+	json_object_object_add(json, "llc", parse_llc(buf, buflen));
 
 	/* a xDLMS APDU should follow immediately after the LLC
 
@@ -698,18 +698,373 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 		json_object_object_add(tmp, "date-time", json_object_new_int(t));
 
 	/* The remaining payload is the notification-body - parse and add to the JSON frame */
-	if (parse_cosem(p, buflen + buf - p, 0, &tmp) > 0)
-		json_object_object_add(json, "notification-body", tmp);
+	if (parse_cosem(p, buflen + buf - p, 0, &body) > 0)
+		json_object_object_add(tmp, "notification-body", body);
 
 	return true;
 }
 
 
-/* take the "raw" JSON data we parsed and convert it to a common vendor-independent struct */
-/*static json_object *normalize(json_object *raw)
+/* take the "raw" JSON data we parsed and convert it to a common vendor-independant struct */
+
+/*
+ Samples:
+
+a) Aidon list 2:
+
+  "data-notification":{
+    "long-invoke-id-and-priority":1088880655,
+    "date-time":0,
+    "notification-body":[
+      {
+        "obis-0":"1-1:0.2.129.255",
+        "visible-string-1":"AIDON_V0001"
+      },
+      {
+        "obis-0":"0-0:96.1.0.255",
+        "visible-string-1":"7359992890941742"
+      },
+      {
+        "obis-0":"0-0:96.1.7.255",
+        "visible-string-1":"6515"
+      },
+      {
+        "obis-0":"1-0:1.7.0.255",
+        "double-long-unsigned-1":1362,
+        "structure-2":{
+          "integer-0":0,
+          "enum-1":27
+        }
+      },
+      {
+        "obis-0":"1-0:2.7.0.255",
+        "double-long-unsigned-1":0,
+        "structure-2":{
+          "integer-0":0,
+          "enum-1":27
+        }
+      },
+      {
+        "obis-0":"1-0:3.7.0.255",
+        "double-long-unsigned-1":996,
+        "structure-2":{
+          "integer-0":0,
+          "enum-1":29
+        }
+      },
+      {
+        "obis-0":"1-0:4.7.0.255",
+        "double-long-unsigned-1":0,
+        "structure-2":{
+          "integer-0":0,
+          "enum-1":29
+        }
+      },
+      {
+        "obis-0":"1-0:31.7.0.255",
+        "long-1":93,
+        "structure-2":{
+          "integer-0":255,
+          "enum-1":33
+        }
+      },
+      {
+        "obis-0":"1-0:32.7.0.255",
+        "long-unsigned-1":2500,
+        "structure-2":{
+          "integer-0":255,
+          "enum-1":35
+        }
+      }
+    ]
+  }
+
+b) Kaifa list 1:
+
+  "data-notification":{
+    "long-invoke-id-and-priority":1088880655,
+    "date-time-bug":true,
+    "date-time":1505254726,
+    "notification-body":{
+      "double-long-unsigned-0":1333
+    }
+  }
+
+c) Kaifa list 2:
+
+  "data-notification":{
+    "long-invoke-id-and-priority":1088880655,
+    "date-time-bug":true,
+    "date-time":1505254730,
+    "notification-body":{
+      "octet-string-0":"KFM_001",
+      "octet-string-1":"6970631401753985",
+      "octet-string-2":"MA304H3E",
+      "double-long-unsigned-3":1316,
+      "double-long-unsigned-4":0,
+      "double-long-unsigned-5":0,
+      "double-long-unsigned-6":129,
+      "double-long-unsigned-7":1746,
+      "double-long-unsigned-8":4565,
+      "double-long-unsigned-9":4712,
+      "double-long-unsigned-10":2400,
+      "double-long-unsigned-11":0,
+      "double-long-unsigned-12":2402
+    }
+  }
+
+d) Kaifa list 3:
+
+  "data-notification":{
+    "long-invoke-id-and-priority":1088880655,
+    "date-time-bug":true,
+    "date-time":1505415610,
+    "notification-body":{
+      "octet-string-0":"KFM_001",
+      "octet-string-1":"6970631401753985",
+      "octet-string-2":"MA304H3E",
+      "double-long-unsigned-3":1022,
+      "double-long-unsigned-4":0,
+      "double-long-unsigned-5":0,
+      "double-long-unsigned-6":64,
+      "double-long-unsigned-7":1937,
+      "double-long-unsigned-8":3229,
+      "double-long-unsigned-9":3430,
+      "double-long-unsigned-10":2369,
+      "double-long-unsigned-11":0,
+      "double-long-unsigned-12":2380,
+      "octet-string-13":"Thu Sep 14 21:00:10 2017",
+      "double-long-unsigned-14":180073,
+      "double-long-unsigned-15":0,
+      "double-long-unsigned-16":247,
+      "double-long-unsigned-17":16380
+    }
+  }
+
+
+
+e) Kamstrup list 1:
+
+  "data-notification":{
+    "long-invoke-id-and-priority":15138831,
+    "date-time-bug":true,
+    "date-time":1508467410,
+    "notification-body":{
+      "visible-string-0":"Kamstrup_V0001",
+      "obis-1":"1-1:0.0.5.255",
+      "visible-string-2":"5706567274389702",
+      "obis-3":"1-1:96.1.1.255",
+      "visible-string-4":"6841121BN243101040",
+      "obis-5":"1-1:1.7.0.255",
+      "double-long-unsigned-6":1468,
+      "obis-7":"1-1:2.7.0.255",
+      "double-long-unsigned-8":0,
+      "obis-9":"1-1:3.7.0.255",
+      "double-long-unsigned-10":0,
+      "obis-11":"1-1:4.7.0.255",
+      "double-long-unsigned-12":462,
+      "obis-13":"1-1:31.7.0.255",
+      "double-long-unsigned-14":564,
+      "obis-15":"1-1:51.7.0.255",
+      "double-long-unsigned-16":202,
+      "obis-17":"1-1:71.7.0.255",
+      "double-long-unsigned-18":511,
+      "obis-19":"1-1:32.7.0.255",
+      "long-unsigned-20":232,
+      "obis-21":"1-1:52.7.0.255",
+      "long-unsigned-22":228,
+      "obis-23":"1-1:72.7.0.255",
+      "long-unsigned-24":233
+    }
+  }
+
+
+f) Kamstrup list 2:
+
+  "data-notification":{
+    "long-invoke-id-and-priority":15138831,
+    "date-time-bug":true,
+    "date-time":1508468405,
+    "notification-body":{
+      "visible-string-0":"Kamstrup_V0001",
+      "obis-1":"1-1:0.0.5.255",
+      "visible-string-2":"5706567274389702",
+      "obis-3":"1-1:96.1.1.255",
+      "visible-string-4":"6841121BN243101040",
+      "obis-5":"1-1:1.7.0.255",
+      "double-long-unsigned-6":2531,
+      "obis-7":"1-1:2.7.0.255",
+      "double-long-unsigned-8":0,
+      "obis-9":"1-1:3.7.0.255",
+      "double-long-unsigned-10":0,
+      "obis-11":"1-1:4.7.0.255",
+      "double-long-unsigned-12":440,
+      "obis-13":"1-1:31.7.0.255",
+      "double-long-unsigned-14":996,
+      "obis-15":"1-1:51.7.0.255",
+      "double-long-unsigned-16":207,
+      "obis-17":"1-1:71.7.0.255",
+      "double-long-unsigned-18":965,
+      "obis-19":"1-1:32.7.0.255",
+      "long-unsigned-20":231,
+      "obis-21":"1-1:52.7.0.255",
+      "long-unsigned-22":226,
+      "obis-23":"1-1:72.7.0.255",
+      "long-unsigned-24":232,
+      "obis-25":"0-1:1.0.0.255",
+      "octet-string-26":"Fri Oct 20 05:00:05 2017",
+      "obis-27":"1-1:1.8.0.255",
+      "double-long-unsigned-28":427244,
+      "obis-29":"1-1:2.8.0.255",
+      "double-long-unsigned-30":0,
+      "obis-31":"1-1:3.8.0.255",
+      "double-long-unsigned-32":80,
+      "obis-33":"1-1:4.8.0.255",
+      "double-long-unsigned-34":61813
+    }
+  }
+
+
+ */
+
+static const char *obis_lookup(const char *list, int idx)
 {
+	switch (idx) {
+	case 1: return "1-1:0.2.129.255";
+	case 2: return "0-0:96.1.0.255";
+	case 3: return "0-0:96.1.7.255";
+	case 4: return "1-0:1.7.0.255";
+	case 5: return "1-0:2.7.0.255";
+	case 6: return "1-0:3.7.0.255";
+	case 7: return "1-0:4.7.0.255";
+	case 8: return "1-0:31.7.0.255";
+	case 9: return "1-0:51.7.0.255";
+	case 10: return "1-0:71.7.0.255";
+	case 11: return "1-0:32.7.0.255";
+	case 12: return "1-0:52.7.0.255";
+	case 13: return "1-0:72.7.0.255";
+	case 14: return "0-0:1.0.0.255";
+	case 15: return "1-0:1.8.0.255";
+	case 16: return "1-0:2.8.0.255";
+	case 17: return "1-0:3.8.0.255";
+	case 18: return "1-0:4.8.0.255";
+	}
+	return "unknown";
 }
+
+static json_object *normalize(json_object *json)
+{
+	json_object *ret, *tmp, *notification, *body;
+
+	/* 1. figure out list format */
+	if (!json_object_object_get_ex(json, "data-notification", &notification))
+		return NULL;
+	if (!json_object_object_get_ex(notification, "notification-body", &body))
+		return NULL;
+
+	ret = json_object_new_object();
+
+	/* include the message time-stamp if available and not 0 */
+	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
+		json_object_object_add(ret, "date-time", json_object_get(tmp));
+	json_object_object_add(ret, "timestamp", json_object_new_int(time(NULL)));
+
+	/* overall formatting differs between the 3:
+
+	   Aidon sends an array of records wrapped in a two- or three-field struct (is this so for list type 1 too?)
+              obis code
+	      value
+	      (when value is number) two-field struct with integer + enum (scale? unit? validity?)
+
+	   Kaifa sends a struct with values only, no codes
+
+	   Kamstrup sends a struct with an odd number of fields, where the first record is the list name and the remaining records are pairs of
+              obis code
+	      value
+
+	   One starting point could be to flatten or expand all the formats into a common struct of 
+	     obis code => value
+
+	   records, where the obis code would be the field name and
+	   the value type implicit either integer or string
+
+	   Then we could use external (confihuration file in JSON?) lists of
+	      obis code => full name
+	      obis code => shortname
+	      obis code => unit
+
+	   to further map the records into an exportable common format.
+
+
+	   Generic flattening logic:
+
+	    - ignore whether the outer envelope is array or struct, simply go through it record for record
+	    - if type of record is struct, then look into the struct to get obis code and value
+	    - if vendor is Kaifa then look at preconfigured lst of codes to get the obis code for each value
+	    - if vendor is Kamstrup, read records in pairs after the first one, getting obis code and then value
+
+	    Note that the "OBIS List version identifier" should
+	    uniquely define the format.  We might want to make it an
+	    external config though...
+
+
+	*/
+
+	if (json_object_is_type(body, json_type_array)) { /* Aidon */
+		int i;
+		const char *mykey;
+		json_object *myval;
+
+		for (i = 0; i < json_object_array_length(body); i++) {
+			tmp = json_object_array_get_idx(body, i);
+			mykey = NULL;
+			myval = NULL;
+
+			/* each element of an Aidon array can have 3 types: string, int and obj  */
+
+			json_object_object_foreach(tmp, key, val) {
+				if (!strncmp(key, "obis", 4))
+					mykey = json_object_get_string(val);
+				else if (!json_object_is_type(val, json_type_object))
+					myval = json_object_get(val);
+			}
+			if (mykey && myval)
+				json_object_object_add(ret, mykey, myval);
+		}
+/*	} else if (json_object_object_length(body) == 1) {
+		json_object_object_add(ret, "1-0:1.7.0.255", json_object_get();
 */
+	} else {
+		const char *mykey;
+		const char *listname = NULL;
+		size_t n = json_object_object_length(body);
+		int i = 0;
+
+		json_object_object_foreach(body, key, val) {
+			i++;
+			if (n == 1)
+				json_object_object_add(ret, "1-0:1.7.0.255", json_object_get(val));
+			else if (!listname) {
+				listname = json_object_get_string(val);
+				json_object_object_add(ret, obis_lookup(listname, 1), json_object_get(val));
+			}
+			else if (!strncmp(key, "obis", 4))
+				mykey = json_object_get_string(val);
+			else
+				json_object_object_add(ret, mykey ? mykey : obis_lookup(listname, i), json_object_get(val));
+		}
+	}
+
+	/* the simplest list has only a single value: Active power+
+	 * (Q1+Q4) in kW both Aidon and Kaifa use this type of
+	 * list. Aidon might need to flatten a struct?
+	 */
+
+
+	/* 2. copy relevant values */
+
+	return ret;
+}
 
 static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
 {
@@ -788,6 +1143,8 @@ skipframe:
 		/* got a complete and verified frame - parse the payload */
 		if (parse_payload(payload, framelen - (payload - hdlc + 1), json))
 			debug("JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+
+		debug("normalized: %s\n", json_object_to_json_string_ext(normalize(json), JSON_C_TO_STRING_PRETTY));
 
 		/* and drop it */
 		json_object_put(json);
