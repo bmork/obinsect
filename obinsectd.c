@@ -38,6 +38,8 @@
 #endif
 #define DESCRIPTION "obinsectd (" VERSION ")"
 
+#define BUFSIZE (1024 * 2)
+
 #ifdef DEBUG
 static bool debug = true;
 #define debug(arg...) fprintf(stderr, arg)
@@ -56,9 +58,6 @@ static bool debug = false;
 #define debug(arg...)
 #define print_packet(pfx, buf, len)
 #endif /* DEBUG */
-
-#define BUFSIZE (1024 * 8)
-static char *buf = NULL;
 
 /*
  * crc16 and HDLC escape code borrowed from modemmanager/libqcdm
@@ -552,7 +551,7 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 			sprintf(fieldname, "%u-%u:%u.%u.%u.%u", buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 			*ret = json_object_new_string(fieldname);
 
-		/* 
+		/*
 		 *  Kamstrup will camouflage date-time fields as octet-strings. We recode
 		 *  as readable date instead of unix epoch time, to keep type compatibility
 		 */
@@ -705,9 +704,16 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 	return true;
 }
 
-static int read_and_parse(int fd)
+
+/* take the "raw" JSON data we parsed and convert it to a common vendor-independent struct */
+/*static json_object *normalize(json_object *raw)
 {
-	unsigned char *payload, *cur, *hdlc, rbuf[512];
+}
+*/
+
+static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
+{
+	unsigned char *payload, *cur, *hdlc;
 	struct pollfd fds[1];
 	int ret, rlen, framelen = -1;
 	json_object *json;
@@ -722,7 +728,7 @@ static int read_and_parse(int fd)
 			return -errno;
 
 		if (fds[0].revents & POLLIN)
-			rlen = read(fd, cur, sizeof(rbuf) + rbuf - cur);
+			rlen = read(fd, cur, rbuflen + rbuf - cur);
 		else
 			rlen = 0;
 
@@ -748,9 +754,9 @@ nextframe:
 				goto skipframe;
 
 			/* realign if exceeding buf size */
-			if (hdlc + framelen + 2 > rbuf + sizeof(rbuf)) {
-				if (framelen + 2 > sizeof(rbuf)) {
-					debug("frame too big: %d > %zd - dropping\n", framelen, sizeof(rbuf) - 2);
+			if (hdlc + framelen + 2 > rbuf + rbuflen) {
+				if (framelen + 2 > rbuflen) {
+					debug("frame too big: %d > %zd - dropping\n", framelen, rbuflen - 2);
 					framelen = -1;
 					cur = rbuf;
 				} else { // realign to start of buffer
@@ -812,6 +818,7 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	int opt, serfd = -1, ret = 0;
+	static unsigned char *buf = NULL;
 
 	fprintf(stderr, "%s\n", DESCRIPTION);
 	while ((opt = getopt_long(argc, argv, "s:n:dh", main_options, NULL)) != -1) {
@@ -834,7 +841,7 @@ int main(int argc, char *argv[])
 		goto err;
 	}
 
-	read_and_parse(serfd);
+	read_and_parse(serfd, buf, BUFSIZE);
 
 err:
 	if (serfd > 0 && serfd != STDIN_FILENO)
