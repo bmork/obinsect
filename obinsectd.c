@@ -124,8 +124,7 @@ static int serial_open(const char *dev)
 		cfmakeraw(&terminal_data);
 		tcsetattr(fd, TCSANOW, &terminal_data);
 	}
-	if (debug)
-		fprintf(stderr, "opened %s\n", dev);
+	debug("opened %s\n", dev);
 	return fd;
 }
 
@@ -287,7 +286,7 @@ ref Kamstrup sample:
 static int hdlc_length(unsigned char *buf)
 {
 	if ((buf[1] & 0xf8) != 0xa0) {  // HDLC type 3 without segmentation
-		fprintf(stderr, "wrong frame type: %0#4x\n", buf[1] >> 4);
+		debug("unsupported frame type/len: %02x%02x\n", buf[1], buf[2]);
 		return -1;
 	}
 
@@ -315,8 +314,10 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	json_object *tmp;
 
 	/* check start and stop markers */
-	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL)
+	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL) {
+		fprintf(stderr, "HDLC frame is missing start or stop markers\n");
 		return NULL;
+	}
 
 	/* verify header */
 	format = buf[1] >> 4;
@@ -327,7 +328,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 
 	segmentation = !!(buf[1] & 0x08);
 	if (segmentation) {
-		fprintf(stderr, "Segmentation is not supported\n");
+		fprintf(stderr, "HDLC segmentation is unsupported\n");
 		return NULL;
 	}
 
@@ -359,7 +360,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	hcs = buf[7 + dstlen] << 8 | buf[6 + dstlen];
 	check = crc16((char *)(buf + 1), 5 + dstlen);
 	if (hcs != check) {
-		fprintf(stderr, "Bogus HDLC header checksum: %#06x != %#06x\n", hcs, check);
+		fprintf(stderr, "HDLC header checksum: %#06x != %#06x\n", hcs, check);
 		return NULL;
 	}
 
@@ -367,7 +368,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	fcs = buf[buflen-2] << 8 | buf[buflen-3];
 	check = crc16((char *)(buf + 1), buflen - 4);
 	if (fcs != check) {
-		fprintf(stderr, "Bogus HDLC frame checksum: %#06x != %#06x\n", fcs, check);
+		fprintf(stderr, "HDLC frame checksum: %#06x != %#06x\n", fcs, check);
 		return NULL;
 	}
 
@@ -389,7 +390,10 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	return &buf[8 + dstlen];
 }
 
-/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.6.1 "Date and time formats" */ 
+/*
+ * ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.6.1 "Date and time formats"
+ * Ignoring hundredths, deviation and status which are unspecified in all samples I've seen
+ */
 static time_t decode_datetime(unsigned char *buf)
 {
 	struct tm t = {};
@@ -401,6 +405,12 @@ static time_t decode_datetime(unsigned char *buf)
 	t.tm_hour = buf[5];
 	t.tm_min = buf[6];
 	t.tm_sec = buf[7];
+	if (buf[8] != 0xff)
+		debug("hundredths are valid: %02x\n", buf[8]);
+	if (buf[9] != 0x80 || buf[10])
+		debug("deviation is valid: %02x %02x\n", buf[9], buf[10]);
+	if (buf[11] && buf[11] != 0xff)
+		debug("staus is valid and set: %02x\n", buf[12]);
 	return mktime(&t);
 }
 
@@ -733,18 +743,18 @@ nextframe:
 			/* verify frame type and get the expectedlength */
 			framelen = hdlc_length(hdlc);
 
-			/* drop if invalid */
+			/* skip frame if invalid */
 			if (framelen < 0)
-				cur = rbuf;
+				goto skipframe;
 
 			/* realign if exceeding buf size */
 			if (hdlc + framelen + 2 > rbuf + sizeof(rbuf)) {
 				if (framelen + 2 > sizeof(rbuf)) {
-					fprintf(stderr, "frame too big: %d > %zd - dropping\n", framelen, sizeof(rbuf) - 2);
+					debug("frame too big: %d > %zd - dropping\n", framelen, sizeof(rbuf) - 2);
 					framelen = -1;
 					cur = rbuf;
 				} else { // realign to start of buffer
-					fprintf(stderr, "moving frame to start of buffer to make it fit\n");
+					debug("moving frame to start of buffer to make it fit\n");
 					memmove(rbuf, hdlc, cur - hdlc);
 					cur -= hdlc - rbuf;
 					hdlc = rbuf;
@@ -759,7 +769,8 @@ nextframe:
 		/* parse and verify the outher HDLC frame */
 		payload = hdlc_verify(hdlc, framelen + 2, &json);
 		if (!payload) {
-			print_packet("*** dropping bogus frame: ***\n", hdlc, framelen + 2);
+skipframe:
+			print_packet("*** dropping bogus frame: ***\n", hdlc, framelen > 0 ? framelen + 2 : 64);
 
 			/* we only skip the initial CONTROL char in case the real frame starts somewhere inside the bogus one */
 			memmove(rbuf, hdlc + 1, cur - hdlc - 1);
@@ -770,7 +781,7 @@ nextframe:
 
 		/* got a complete and verified frame - parse the payload */
 		if (parse_payload(payload, framelen - (payload - hdlc + 1), json))
-			fprintf(stderr, "JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+			debug("JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
 
 		/* and drop it */
 		json_object_put(json);
