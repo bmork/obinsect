@@ -12,5 +12,5 @@ all: $(BINARIES)
 	rm -f *.o *.so *.lo *~ $(BINARIES) 
 
 obinsectd: obinsectd.c
-	$(CC) $(CFLAGS) -DDEBUG -Wno-unused-function $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -DDEBUG $(LDFLAGS) -o $@ $^
 

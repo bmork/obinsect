@@ -304,28 +304,6 @@ static unsigned char *hdlc_start(unsigned char *buf, size_t buflen)
 	return p;
 }
 
-static const char *hdlc_control(unsigned char control)
-{
-	static char buf[] = "I-frame (rsn=X, ssn=X)";
-
-	if (control & 3) { /* U-frame */
-		switch (control & 0xec) {
-		case 0:
-			return "UI-frame";
-		default:
-			return "unknown U-frame";
-		}
-	} else if (control & 1) { /* S-frame */
-		switch (control & 0x0c) {
-		default:
-			sprintf(buf, "S-frame (rsn=%d)", control >> 5);
-		}
-	} else { /* I-frame */
-		sprintf(buf, "I-frame (rsn=%d, ssn=%d)", control >> 5, (control >> 1) & 7);
-	}
-	return buf;
-}
-
 static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object **hdlc)
 {
 	int i, format, segmentation, length, src, dst, control, hcs, fcs, check;
@@ -456,29 +434,6 @@ static bool is_obis(unsigned char *code)
 	return true;
 }
 
-/* 
- * cosem_variable_len() returns true if the type stores its length in the second byte
- *
- * NOTE: the length is not necessarily octects, for example for arrays
- * (number of elements) and structs (number of fields)
- */
-static bool cosem_variable_len(unsigned char type)
-{
-	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
-	switch (type) {
-	case 1:
-	case 2:
-     /* case 4: - who knows? */
-	case 9:
-	case 10:
-	case 12:
-     /* case 13: - who knows? */
-		return true;
-	default:
-		return false;
-	}
-}
-
 static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool sign)
 {
 	__uint32_t hi, lo;
@@ -511,6 +466,16 @@ static json_object *json_object_new_bytearray(unsigned char *raw, size_t len)
 	return ret;
 }
 
+static bool is_ascii_printable(unsigned char *raw, size_t len)
+{
+	int i;
+
+	for (i = 0; i < len; i++)
+		if (raw[i] < 32 || raw[i] > 127)
+			return false;
+	return true;
+}
+
 /* parse_cosem() returns the number of eaten bytes, as well as a JSON object in ret */
 static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object **ret)
 {
@@ -518,6 +483,8 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 	json_object *myobj;
 	char fieldname[32]; /* "double-long-unsigned" is 20 bytes */
 	time_t t;
+
+	*ret = NULL;
 
 	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
 	switch (buf[0]) {
@@ -530,6 +497,8 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 		len = 2;
 		for (i = 0; i < buf[1]; i++) {
 			n = parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
+			if (n < 0 || len > buflen)
+				goto err;
 			json_object_array_add(*ret, myobj);
 			len += n;
 		}
@@ -539,6 +508,8 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 		len = 2;
 		for (i = 0; i < buf[1]; i++) {
 			n = parse_cosem(&buf[len], buflen - len, lvl + 1, &myobj);
+			if (n < 0 || len > buflen)
+				goto err;
 			sprintf(fieldname, "%s-%u", is_obis(&buf[len]) ? "obis" : cosem_typestr(buf[len]), i);
 			json_object_object_add(*ret, fieldname, myobj);
 			len += n;
@@ -554,15 +525,24 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 		break;
 	case 9: // octet-string
 		len = 2 + buf[1];
+
+		/* is this an OBIS code? */
 		if (is_obis(buf)) {
 			sprintf(fieldname, "%u-%u:%u.%u.%u.%u", buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 			*ret = json_object_new_string(fieldname);
-//			*ret = cosem_object_new(buf, len, json_object_new_bytearray(&buf[2], buf[1]));
+
+		/* 
+		 *  Kamstrup will camouflage date-time fields as octet-strings. We recode
+		 *  as readable date instead of unix epoch time, to keep type compatibility
+		 */
 		} else if (buf[1] == 12 && buf[2] == 7) { /* works until 2047 */
 			t = decode_datetime(&buf[2]);
 			*ret = json_object_new_string_len(ctime(&t), 24);
-		} else
+		} else if (is_ascii_printable(&buf[2], buf[1])) {
 			*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
+		} else {
+			*ret = json_object_new_bytearray(&buf[2], buf[1]);
+		}
 		break;
 	case 10: // visible-string
 		len = 2 + buf[1];
@@ -606,15 +586,19 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
  		break;
 	default:
 		fprintf(stderr, "ERROR: Unsupported COSEM data type: %d (%02x)\n", buf[0], buf[0]);
-		*ret = NULL;
-		len = -1;
 	}
 	if (len > buflen) {
 		fprintf(stderr, "ERROR: Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
-		*ret = NULL;
-		len = -1;
+		goto err;
 	}
-	return len;
+	if (*ret)
+		return len;
+
+err:
+	if (*ret)
+		json_object_put(*ret);
+	*ret = NULL;
+	return -1;
 }
 
 static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
