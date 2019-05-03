@@ -304,11 +304,15 @@ static unsigned char *hdlc_start(unsigned char *buf, size_t buflen)
 	return p;
 }
 
-static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object **hdlc)
+/* verifies the HDLC header and checksums, and returns the offset to the payload
+   side-effect on success:
+     creates a new top level json object to hold the parsed frame, adding a hdlc
+     struct with format, segmentation, length, src, dst, control, hcs and fcs fields
+*/
+static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object **json)
 {
-	int i, format, segmentation, length, src, dst, control, hcs, fcs, check;
-
-	*hdlc = json_object_new_object();
+	int dstlen, format, segmentation, length, src, dst, control, hcs, fcs, check;
+	json_object *tmp;
 
 	/* check start and stop markers */
 	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL)
@@ -320,51 +324,44 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 		fprintf(stderr, "DLMS/COSEM requires HDLC frame format \"type 3\" - %#04x is invalid\n", format);
 		return NULL;
 	}
-	json_object_object_add(*hdlc, "format",  json_object_new_int(format));
 
 	segmentation = !!(buf[1] & 0x08);
 	if (segmentation) {
 		fprintf(stderr, "Segmentation is not supported\n");
 		return NULL;
 	}
-	json_object_object_add(*hdlc, "segmentation", json_object_new_boolean(segmentation));
 
 	length = hdlc_length(buf);
 	if (length != buflen - 2) {
 		fprintf(stderr, "Invalid HDLC frame length: %d != %zd\n", length, buflen - 2);
 		return NULL;
 	}
-	json_object_object_add(*hdlc, "length", json_object_new_int(length));
 
 	/* src address is always 1 byte */
 	src = buf[3];
-	json_object_object_add(*hdlc, "src", json_object_new_int(src));
 
 	/* dst address is 1, 2 or 4 bytes */
 	dst = 0;
-	for (i = 0; i < 4; i++) {
+	for (dstlen = 0; dstlen < 4; dstlen++) {
 		dst <<= 8;
-		dst |= buf[4 + i];
+		dst |= buf[4 + dstlen];
 		if (dst & 1)
 			break;
 	}
-	json_object_object_add(*hdlc, "dst", json_object_new_int(dst));
 
-	if (i == 3) {
+	if (dstlen == 3) {
 		fprintf(stderr, "Bogus HDLC destination address - 3 bytes?: %02x %02x %02x\n", buf[4], buf[5], buf[6]);
 		return NULL;
 	}
 
-	control = buf[5 + i];
-	json_object_object_add(*hdlc, "control", json_object_new_int(control));
+	control = buf[5 + dstlen];
 
-	hcs = buf[7 + i] << 8 | buf[6 + i];
-	check = crc16((char *)(buf + 1), 5 + i);
+	hcs = buf[7 + dstlen] << 8 | buf[6 + dstlen];
+	check = crc16((char *)(buf + 1), 5 + dstlen);
 	if (hcs != check) {
 		fprintf(stderr, "Bogus HDLC header checksum: %#06x != %#06x\n", hcs, check);
 		return NULL;
 	}
-	json_object_object_add(*hdlc, "hcs", json_object_new_int(hcs));
 
 	/* This will be the HCS, and therefore redundant, in case of an empty payload */
 	fcs = buf[buflen-2] << 8 | buf[buflen-3];
@@ -373,9 +370,23 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 		fprintf(stderr, "Bogus HDLC frame checksum: %#06x != %#06x\n", fcs, check);
 		return NULL;
 	}
-	json_object_object_add(*hdlc, "fcs", json_object_new_int(fcs));
 
-	return &buf[8 + i];
+	/* create JSON frame object with HDLC data */
+	tmp = json_object_new_object();
+	json_object_object_add(tmp, "format",  json_object_new_int(format));
+	json_object_object_add(tmp, "segmentation", json_object_new_boolean(segmentation));
+	json_object_object_add(tmp, "length", json_object_new_int(length));
+	json_object_object_add(tmp, "src", json_object_new_int(src));
+	json_object_object_add(tmp, "dst", json_object_new_int(dst));
+	json_object_object_add(tmp, "control", json_object_new_int(control));
+	json_object_object_add(tmp, "hcs", json_object_new_int(hcs));
+	json_object_object_add(tmp, "fcs", json_object_new_int(fcs));
+
+	*json = json_object_new_object();
+	json_object_object_add(*json, "hdlc", tmp);
+
+	/* return offset to payload */
+	return &buf[8 + dstlen];
 }
 
 /* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.6.1 "Date and time formats" */ 
@@ -601,25 +612,42 @@ err:
 	return -1;
 }
 
-static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
+
+
+/*
+ * the first 3 bytes of the payload is LLC:
+ *   LSAP | DSAP | Quality, fixed to e6 e7 00
+ */
+
+static json_object *parse_llc(unsigned char *buf, size_t buflen)
+{
+	json_object *tmp;
+
+	if (buf[0] != 0xe6 || buf[1] != 0xe7 || buf[2] != 0x00) {
+		fprintf(stderr, "Invalid LLC header: %02x %02x %02x\n", buf[0], buf[1], buf[2]);
+		return NULL;
+	}
+
+	tmp = json_object_new_object();
+	json_object_object_add(tmp, "lsap",  json_object_new_int(0xe6));
+	json_object_object_add(tmp, "dsap",  json_object_new_int(0xe7));
+	json_object_object_add(tmp, "quality",  json_object_new_int(0x00));
+
+	return tmp;
+}
+
+static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 {
 	unsigned long invokeid;
 	unsigned char *p;
 	time_t t;
-	json_object *myobj, *foo, *bar;
+	json_object *tmp;
 	bool datetime_bug = false;
 
-	/*
-	 * the first 3 bytes of the payload is LLC:
-	 *   LSAP | DSAP | Quality, fixed to e6 e7 00
-	 */
-	if (buf[0] != 0xe6 || buf[1] != 0xe7 || buf[2] != 0x00) {
-		fprintf(stderr, "Invalid LLC header: %02x %02x %02x\n", buf[0], buf[1], buf[2]);
-		return -1;
-	}
+	/* add LLC field */
+	json_object_object_add(json, "hdlc", parse_llc(buf, buflen));
 
-	/*
-	 * then follows a xDLMS APDU with:
+	/* a xDLMS APDU should follow immediately after the LLC
 
 	 0F            data-notification [15]
 	 00 00 00 00   long-invoke-id-and-priority
@@ -628,13 +656,16 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 
 	*/
 
-	if (buf[3] != 0x0f) {
-		fprintf(stderr, "xDLMS APDU must be 'data-notification' [15], not [%d], according to IEC 62056-7-5:2017\n", buf[3]);
-		return -1;
+	p = &buf[3];
+	if (p[0] != 0x0f) {
+		fprintf(stderr, "The xDLMS APDU must be 'data-notification' [15], not [%d], according to IEC 62056-7-5:2017\n", p[0]);
+		return false;
 	}
+	p++;
 
-	invokeid = buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7];
-	p = &buf[8];
+	/* don't bother decoding the individual bits of long-invoke-id-and-priority */
+	invokeid = p[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
+	p += 4;
 
 	/* some buggy firmwares includes a 0x09 type byte before the date-time - skip it */
 	if (p[0] == 0x09) {
@@ -642,32 +673,26 @@ static int parse_payload(unsigned char *buf, size_t buflen, json_object *hdlc)
 		p++;
 	}
 
-	/* date-time field should by exactly 12 bytes, but could also be 0 */
+	/* The date-time field should by exactly 0 or 12 bytes, */
 	if (p[0] == 12)
 		t = decode_datetime(&p[1]);
 	p += p[0] + 1;
 
-	myobj = json_object_new_object();
-	json_object_object_add(myobj, "hdlc",  hdlc);
-	foo = json_object_new_object();
-	json_object_object_add(myobj, "llc",  foo);
-	json_object_object_add(foo, "lsap",  json_object_new_int(0xe6));
-	json_object_object_add(foo, "dsap",  json_object_new_int(0xe7));
-	json_object_object_add(foo, "quality",  json_object_new_int(0x00));
 
-	foo = json_object_new_object();
-	json_object_object_add(myobj, "data-notification",  foo);
-	json_object_object_add(foo, "long-invoke-id-and-priority", json_object_new_int(invokeid));
+	/* add a data-notification field to the JSON frame */
+	tmp = json_object_new_object();
+	json_object_object_add(json, "data-notification",  tmp);
+	json_object_object_add(tmp, "long-invoke-id-and-priority", json_object_new_int(invokeid));
 	if (datetime_bug)
-		json_object_object_add(foo, "date-time-bug", json_object_new_boolean(true));
+		json_object_object_add(tmp, "date-time-bug", json_object_new_boolean(true));
 	if (t)
-		json_object_object_add(foo, "date-time", json_object_new_int(t));
+		json_object_object_add(tmp, "date-time", json_object_new_int(t));
 
-	parse_cosem(p, buflen + buf - p, 0, &bar);
-	json_object_object_add(foo, "notification-body", bar);
+	/* The remaining payload is the notification-body - parse and add to the JSON frame */
+	if (parse_cosem(p, buflen + buf - p, 0, &tmp) > 0)
+		json_object_object_add(json, "notification-body", tmp);
 
-	fprintf(stderr, "JSON: %s\n", json_object_to_json_string_ext(myobj, JSON_C_TO_STRING_PRETTY));
-	return 0;
+	return true;
 }
 
 static int read_and_parse(int fd)
@@ -675,7 +700,7 @@ static int read_and_parse(int fd)
 	unsigned char *payload, *cur, *hdlc, rbuf[512];
 	struct pollfd fds[1];
 	int ret, rlen, framelen = -1;
-	json_object *hdlc_json;
+	json_object *json;
 
 	fds[0].fd = fd;
 	fds[0].events = POLLIN;
@@ -705,6 +730,7 @@ nextframe:
 			if (!hdlc || cur  - hdlc < 3)
 				continue;
 
+			/* verify frame type and get the expectedlength */
 			framelen = hdlc_length(hdlc);
 
 			/* drop if invalid */
@@ -726,24 +752,28 @@ nextframe:
 			}
 		}
 
-		/* waiting to complete a frame? */
+		/* still waiting for the complete frame? */
 		if (framelen > 0 && (cur - hdlc) < (framelen + 2))
 			continue;
 
-		// verify frame
-		payload = hdlc_verify(hdlc, framelen + 2, &hdlc_json);
+		/* parse and verify the outher HDLC frame */
+		payload = hdlc_verify(hdlc, framelen + 2, &json);
 		if (!payload) {
 			print_packet("*** dropping bogus frame: ***\n", hdlc, framelen + 2);
 
-			/* only skip the first CONTROL char in case the real frame starts inside the bogus one */
+			/* we only skip the initial CONTROL char in case the real frame starts somewhere inside the bogus one */
 			memmove(rbuf, hdlc + 1, cur - hdlc - 1);
 			cur -= hdlc - rbuf + 1;
 			framelen = -1;
 			goto nextframe;
 		}
 
-		// got a complete frame
-		parse_payload(payload, framelen - (payload - hdlc + 1), hdlc_json);
+		/* got a complete and verified frame - parse the payload */
+		if (parse_payload(payload, framelen - (payload - hdlc + 1), json))
+			fprintf(stderr, "JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+
+		/* and drop it */
+		json_object_put(json);
 
 		/* keep remaining data for next frame, including the stop marker in case it doubles as start of next frame */
 		memmove(rbuf, hdlc + framelen + 1, cur - rbuf - framelen + 1);
