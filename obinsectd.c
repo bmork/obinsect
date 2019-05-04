@@ -23,6 +23,7 @@
 #include <getopt.h>
 #include <fcntl.h>
 #include <json.h>
+#include <mosquitto.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -1066,7 +1067,25 @@ static json_object *normalize(json_object *json)
 	return ret;
 }
 
-static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
+static int publish(struct mosquitto *mosq, json_object *json, json_object *normal, unsigned char *raw, size_t rawlen)
+{
+	int mid;
+	const char *pub;
+	size_t publen;
+	
+	print_packet("*** raw packet:\n", raw, rawlen);
+	debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+	debug("*** normal:\n%s\n", json_object_to_json_string_ext(normal, JSON_C_TO_STRING_PRETTY));
+
+	// * requires libjson-c version 0.13+
+	// pub = json_object_to_json_string_length(normal, JSON_C_TO_STRING_PLAIN, &publen);
+	pub = json_object_to_json_string_ext(normal, JSON_C_TO_STRING_PLAIN);
+	publen = strlen(pub);
+	mosquitto_publish(mosq, &mid, "/foo/bar", publen, pub, 0, false);
+	return 0;
+}
+
+static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, size_t rbuflen)
 {
 	unsigned char *payload, *cur, *hdlc;
 	struct pollfd fds[1];
@@ -1142,9 +1161,7 @@ skipframe:
 
 		/* got a complete and verified frame - parse the payload */
 		if (parse_payload(payload, framelen - (payload - hdlc + 1), json))
-			;;//					debug("JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
-
-		debug("normalized: %s\n", json_object_to_json_string_ext(normalize(json), JSON_C_TO_STRING_PRETTY));
+			publish(mosq, json, normalize(json), hdlc, framelen + 2);
 
 		/* and drop it */
 		json_object_put(json);
@@ -1167,15 +1184,33 @@ static struct option main_options[] = {
 
 static void usage(const char *prog)
 {
+	int maj, min, rev;
+
+	mosquitto_lib_version(&maj, &min, &rev);
 	fprintf(stderr,
-		"\n%s: %s [--help] [--debug] --serial <device>\n",
-		__func__, prog);
+		"\n%s: %s [--help] [--debug] --serial <device>\n\t(using libmosquitto %u.%u.%u)\n",
+		__func__, prog, maj, min, rev);
 }
 
 int main(int argc, char *argv[])
 {
 	int opt, serfd = -1, ret = 0;
 	static unsigned char *buf = NULL;
+	// mosquitto client
+	struct mosquitto *mosq = NULL;
+	// mosquitto opts
+	char *mqttid = NULL;
+	char *host = "localhost";
+	int port = 1883;
+	int keepalive = 60;
+	bool clean_session = true;
+	// mosquitto auth opts
+	char *mqttuser = NULL, *mqttpw = NULL;
+	// mosquitto tls opts
+	const char *cafile = NULL;
+  	const char *capath = NULL;
+  	const char *certfile = NULL;
+  	const char *keyfile = NULL;
 
 	fprintf(stderr, "%s\n", DESCRIPTION);
 	while ((opt = getopt_long(argc, argv, "s:n:dh", main_options, NULL)) != -1) {
@@ -1192,17 +1227,42 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/* initialize mqtt client and read buffer */
+	mosquitto_lib_init();
+	mosq = mosquitto_new(mqttid, clean_session, NULL);
 	buf = malloc(BUFSIZE);
-	if (!buf) {
+	if (!buf || !mosq) {
+		fprintf(stderr, "Error: Out of memory.\n");
 		ret = -ENOMEM;
 		goto err;
 	}
 
-	read_and_parse(serfd, buf, BUFSIZE);
+	/* configure broker connection */
+	if (mqttuser)
+		mosquitto_username_pw_set(mosq, mqttuser, mqttpw);
+	if (certfile || keyfile) {
+		if (!certfile || !keyfile) {
+			fprintf(stderr, "Need both cert and key for TLS\n");
+			goto err;
+		}
+		mosquitto_tls_set(mosq, cafile, capath, certfile, keyfile, NULL); // FIXME: callback?
+		// mosquitto_tls_opts_set()
+		// mosquitto_tls_insecure_set()
+		// mosquitto_tls_psk_set()
+	}
+
+	/* connect to broker */
+	mosquitto_connect(mosq, host, port, keepalive);
+
+	/* loop forever */
+	read_and_parse(serfd, mosq, buf, BUFSIZE);
 
 err:
+
 	if (serfd > 0 && serfd != STDIN_FILENO)
 		close(serfd);
 	free(buf);
+	mosquitto_destroy(mosq);
+	mosquitto_lib_cleanup();
 	return ret;
 }

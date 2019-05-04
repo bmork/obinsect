@@ -1,8 +1,8 @@
 VERSION := 0.01
 
 CC=gcc -g -DVERSION='"$(VERSION)"'
-LDFLAGS=$(shell pkg-config --libs json-c)
-CFLAGS=-Wall $(shell pkg-config --cflags json-c)
+LDFLAGS=$(shell pkg-config --libs json-c) $(shell pkg-config --libs libmosquitto)
+CFLAGS=-Wall $(shell pkg-config --cflags json-c) $(shell pkg-config --cflags libmosquitto)
 
 BINARIES=obinsectd
 
