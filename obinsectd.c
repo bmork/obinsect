@@ -477,37 +477,20 @@ static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool
 	return json_object_new_int(sign ? (__int32_t)lo : lo);
 }
 
-static json_object *json_object_new_bytearray(unsigned char *raw, size_t len)
-{
-	json_object *ret = json_object_new_array();
-	int i;
-
-	for (i = 0; i < len; i++)
-		json_object_array_add(ret, json_object_new_int(raw[i]));
-	return ret;
-}
-
-static bool is_ascii_printable(unsigned char *raw, size_t len)
-{
-	int i;
-
-	for (i = 0; i < len; i++)
-		if (raw[i] < 32 || raw[i] > 127)
-			return false;
-	return true;
-}
-
-/* parse_cosem() returns the number of eaten bytes, as well as a JSON object in ret */
+/*
+ * parse_cosem() returns the number of eaten bytes, as well as a JSON
+ * object in ret.
+ *
+ * type defs: DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types"
+ */
 static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object **ret)
 {
 	int i, len, n;
 	json_object *myobj;
 	char fieldname[32]; /* "double-long-unsigned" is 20 bytes */
-	time_t t;
 
 	*ret = NULL;
 
-	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
 	switch (buf[0]) {
 	case 0: // null-data
 		len = 1;
@@ -545,33 +528,17 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
  		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 9: // octet-string
-		len = 2 + buf[1];
-
-		/* is this an OBIS code? */
+		/* is this an OBIS code? - special handling make them a bit more readable */
 		if (is_obis(buf)) {
 			sprintf(fieldname, "%u-%u:%u.%u.%u.%u", buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 			*ret = json_object_new_string(fieldname);
-
-		/*
-		 *  Kamstrup will camouflage date-time fields as octet-strings. We recode
-		 *  as readable date instead of unix epoch time, to keep type compatibility
-		 */
-		} else if (buf[1] == 12 && buf[2] == 7) { /* works until 2047 */
-			t = decode_datetime(&buf[2]);
-			*ret = json_object_new_string_len(ctime(&t), 24);
-		} else if (is_ascii_printable(&buf[2], buf[1])) {
-			*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
-		} else {
-			*ret = json_object_new_bytearray(&buf[2], buf[1]);
 		}
-		break;
+		/* fall through */
 	case 10: // visible-string
-		len = 2 + buf[1];
- 		*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
-		break;
 	case 12: // utf8-string
 		len = 2 + buf[1];
- 		*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
+		if (!*ret)
+			*ret = json_object_new_string_len((char *)&buf[2], buf[1]);
 		break;
 	case 15: // integer
 		len = 1;
@@ -953,6 +920,16 @@ static const char *obis_lookup(const char *list, int idx)
 	return "unknown";
 }
 
+static json_object *obis_get_val(const char *key, json_object *val)
+{
+	/* some OBIS codes use "wrong" types - fixup for normailization*/
+	if (!strcmp(key, "0-1:1.0.0.255") && json_object_get_string_len(val) == 12) // date-time coded as octet-string
+		return json_object_new_int(decode_datetime((unsigned char *)json_object_get_string(val)));
+
+	/* default to return val as-is, but with increased ref */
+	return json_object_get(val);
+}
+
 static json_object *normalize(json_object *json)
 {
 	json_object *ret, *tmp, *notification, *body;
@@ -965,10 +942,12 @@ static json_object *normalize(json_object *json)
 
 	ret = json_object_new_object();
 
+	/* add some local metadata */
+	json_object_object_add(ret, "timestamp", json_object_new_int(time(NULL)));
+
 	/* include the message time-stamp if available and not 0 */
 	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
 		json_object_object_add(ret, "date-time", json_object_get(tmp));
-	json_object_object_add(ret, "timestamp", json_object_new_int(time(NULL)));
 
 	/* overall formatting differs between the 3:
 
@@ -1011,7 +990,7 @@ static json_object *normalize(json_object *json)
 
 	*/
 
-	if (json_object_is_type(body, json_type_array)) { /* Aidon */
+	if (json_object_is_type(body, json_type_array)) { /* Must be Aidon? */
 		int i;
 		const char *mykey;
 		json_object *myval;
@@ -1021,20 +1000,43 @@ static json_object *normalize(json_object *json)
 			mykey = NULL;
 			myval = NULL;
 
-			/* each element of an Aidon array can have 3 types: string, int and obj  */
+			/* each element of an Aidon array is either a
+			 * two-field struct:
+      {
+        "obis-0":"0-0:96.1.7.255",
+        "visible-string-1":"6515"
+      },
+			 * or three-field struct:
+      {
+        "obis-0":"1-0:1.7.0.255",
+        "double-long-unsigned-1":1362,
+        "structure-2":{
+          "integer-0":0,
+          "enum-1":27
+        }
+      },
 
+			 * the first field is always (except maybe for
+			 * list 1?) the obis code, and will be named
+			 * "obis-0"
+			 *
+			 * the second field is the value, which can
+			 * different integer or string types
+			 *
+			 * the third field is present for (all?)
+			 * integer values, and is a two-element struct
+			 * with a one-byte signed integer and an enum
+			 * maybe scale and unit?
+			 */
 			json_object_object_foreach(tmp, key, val) {
 				if (!strncmp(key, "obis", 4))
 					mykey = json_object_get_string(val);
-				else if (!json_object_is_type(val, json_type_object))
-					myval = json_object_get(val);
+				else if (!myval && !json_object_is_type(val, json_type_object))
+					myval = val;
 			}
 			if (mykey && myval)
-				json_object_object_add(ret, mykey, myval);
+				json_object_object_add(ret, mykey, obis_get_val(mykey, myval));
 		}
-/*	} else if (json_object_object_length(body) == 1) {
-		json_object_object_add(ret, "1-0:1.7.0.255", json_object_get();
-*/
 	} else {
 		const char *mykey = NULL;
 		const char *listname = NULL;
@@ -1044,25 +1046,23 @@ static json_object *normalize(json_object *json)
 		json_object_object_foreach(body, key, val) {
 			i++;
 			if (n == 1)
+				/* the simplest Aidon and Kaifa list
+				 * has only a single value:
+				 *  - Active power+ (Q1+Q4) in kW
+				 */
 				json_object_object_add(ret, "1-0:1.7.0.255", json_object_get(val));
 			else if (!listname) {
+				/* the list name is always the first value of any multi-element list */
 				listname = json_object_get_string(val);
 				json_object_object_add(ret, obis_lookup(listname, 1), json_object_get(val));
 			}
 			else if (!strncmp(key, "obis", 4))
 				mykey = json_object_get_string(val);
 			else
-				json_object_object_add(ret, mykey ? mykey : obis_lookup(listname, i), json_object_get(val));
+				/* "mykey" is the obis code for Kamstrup lists. Look up by index for Kaifa lists */
+				json_object_object_add(ret, mykey ? mykey : obis_lookup(listname, i), obis_get_val(mykey, val));
 		}
 	}
-
-	/* the simplest list has only a single value: Active power+
-	 * (Q1+Q4) in kW both Aidon and Kaifa use this type of
-	 * list. Aidon might need to flatten a struct?
-	 */
-
-
-	/* 2. copy relevant values */
 
 	return ret;
 }
@@ -1072,7 +1072,7 @@ static int publish(struct mosquitto *mosq, json_object *json, json_object *norma
 	int mid;
 	const char *pub;
 	size_t publen;
-	
+
 	print_packet("*** raw packet:\n", raw, rawlen);
 	debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
 	debug("*** normal:\n%s\n", json_object_to_json_string_ext(normal, JSON_C_TO_STRING_PRETTY));
