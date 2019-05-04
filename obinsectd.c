@@ -1035,7 +1035,7 @@ static json_object *normalize(json_object *json)
 		json_object_object_add(ret, "1-0:1.7.0.255", json_object_get();
 */
 	} else {
-		const char *mykey;
+		const char *mykey = NULL;
 		const char *listname = NULL;
 		size_t n = json_object_object_length(body);
 		int i = 0;
@@ -1142,7 +1142,7 @@ skipframe:
 
 		/* got a complete and verified frame - parse the payload */
 		if (parse_payload(payload, framelen - (payload - hdlc + 1), json))
-			debug("JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+			;;//					debug("JSON: %s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
 
 		debug("normalized: %s\n", json_object_to_json_string_ext(normalize(json), JSON_C_TO_STRING_PRETTY));
 
