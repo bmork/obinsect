@@ -12,5 +12,5 @@ all: $(BINARIES)
 	rm -f *.o *.so *.lo *~ $(BINARIES) 
 
 obinsectd: obinsectd.c
-	$(CC) $(CFLAGS) -DDEBUG $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -DDEBUG -DWITH_TLS $(LDFLAGS) -o $@ $^
 

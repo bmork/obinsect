@@ -4,7 +4,9 @@
  * A simple OBIS COSEM to MQTT proxy
  *
  * Copyright 2019 Bjørn Mork <bjorn@mork.no>
- * crc16 and hdlc parts are:  Copyright (C) 2010 Red Hat, Inc.
+ *
+ * crc16 and hdlc parts were taken from modemmanager, having:
+ *   Copyright (C) 2010 Red Hat, Inc.
  *
  * Parsing struct:
  *   https://github.com/roarfred/AmsToMqttBridge/tree/master/Code/Arduino/HanReader/src
@@ -1067,9 +1069,10 @@ static json_object *normalize(json_object *json)
 	return ret;
 }
 
+// FIMXE: topic, qos and variable mapping should be configurable - json config file?
 static int publish(struct mosquitto *mosq, json_object *json, json_object *normal, unsigned char *raw, size_t rawlen)
 {
-	int mid;
+	static int mid = 1;
 	const char *pub;
 	size_t publen;
 
@@ -1176,9 +1179,27 @@ skipframe:
 }
 
 static struct option main_options[] = {
-	{ "help",	0, 0, 'h' },
-	{ "serial",     1, 0, 's' },
+	{ "help",	0, 0, '?' },
+
 	{ "debug",      0, 0, 'd' },
+
+	{ "host",       1, 0, 'h' },
+	{ "id",         1, 0, 'i' },
+	{ "keepalive",  1, 0, 'k' },
+	{ "port",       1, 0, 'p' },
+	{ "password",   1, 0, 'P' },
+	{ "serial",     1, 0, 's' },
+	{ "user",       1, 0, 'u' },
+
+#ifdef WITH_TLS
+#ifdef WITH_TLS
+	{ "cafile",     1, 0, 1 },
+	{ "capath",     1, 0, 2 },
+	{ "cert",       1, 0, 3 },
+	{ "key",        1, 0, 4 },
+	{ "insecure",   0, 0, 5 },
+#endif
+#endif
 	{ 0, 0, 0, 0 }
 };
 
@@ -1187,10 +1208,37 @@ static void usage(const char *prog)
 	int maj, min, rev;
 
 	mosquitto_lib_version(&maj, &min, &rev);
-	fprintf(stderr,
-		"\n%s: %s [--help] [--debug] --serial <device>\n\t(using libmosquitto %u.%u.%u)\n",
-		__func__, prog, maj, min, rev);
+	printf("%s version %s, using libmosquitto %u.%u.%u\n", prog, VERSION, maj, min, rev);
+	printf("Usage: %s [-d] -s device\n", prog);
+	printf("                     [-h host] [-p port] [-u username [-P password]]\n");
+	printf("                     [-i id] [-k keepalive]\n");
+#ifdef WITH_TLS
+	printf("                     [-i id] [-k keepalive] [--insecure]\n");
+	printf("                     [{--cafile file | --capath dir} [--cert file] [--key file]\n");
+#else
+	printf("                     [-i id] [-k keepalive]\n");
+#endif
+
+	printf(" -d : enable debugging\n");
+	printf(" -h : MQTT host. Default is localhost\n");
+	printf(" -i : MQTT id\n");
+	printf(" -k : MQTT keepalive in seconds. Default is 60\n");
+	printf(" -p : MQTT port. Default is 1883 (8883 for TLS)\n");
+	printf(" -P : MQTT password\n");
+	printf(" -s : serial device connected to M-Bus\n");
+	printf(" -u : MQTT username\n");
+
+#ifdef WITH_TLS
+	printf(" --insecure : do not check MQTT broker certificate hostname\n");
+	printf(" --cafile   : path to trusted CA certificates file\n");
+	printf(" --capath   : path to trusted CA certificates directory\n");
+	printf(" --cert     : MQTT client certificate\n");
+	printf(" --key      : MQTT client private key\n");
+#endif
+
 }
+
+
 
 int main(int argc, char *argv[])
 {
@@ -1206,24 +1254,62 @@ int main(int argc, char *argv[])
 	bool clean_session = true;
 	// mosquitto auth opts
 	char *mqttuser = NULL, *mqttpw = NULL;
+#ifdef WITH_TLS
 	// mosquitto tls opts
 	const char *cafile = NULL;
   	const char *capath = NULL;
   	const char *certfile = NULL;
   	const char *keyfile = NULL;
+	bool insecure = false;
+#endif
 
 	fprintf(stderr, "%s\n", DESCRIPTION);
-	while ((opt = getopt_long(argc, argv, "s:n:dh", main_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "?dh:i:k:p:P:s:u", main_options, NULL)) != -1) {
 		switch(opt) {
-		case 's':
-			serfd = !optarg[1] && optarg[0] == '-' ? STDIN_FILENO : serial_open(optarg);
-			break;
+		case '?':
+			usage(argv[0]);
+			return 0;
 		case 'd':
 			debug = true;
 			break;
 		case 'h':
-			usage(argv[0]);
-			return 0;
+			host = optarg;
+			break;
+		case 'i':
+			mqttid = optarg;
+			break;
+		case 'k':
+			keepalive = atoi(optarg);
+			break;
+		case 'p':
+			port = atoi(optarg);
+			break;
+		case 'P':
+			mqttpw = optarg;
+			break;
+		case 's':
+			serfd = !optarg[1] && optarg[0] == '-' ? STDIN_FILENO : serial_open(optarg);
+			break;
+		case 'u':
+			mqttuser = optarg;
+			break;
+#ifdef WITH_TLS
+		case 1:
+			cafile = optarg;
+			break;
+		case 2:
+			capath = optarg;
+			break;
+		case 3:
+			certfile = optarg;
+			break;
+		case 4:
+			keyfile = optarg;
+			break;
+		case 5:
+			insecure = true;
+			break;
+#endif
 		}
 	}
 
@@ -1240,6 +1326,8 @@ int main(int argc, char *argv[])
 	/* configure broker connection */
 	if (mqttuser)
 		mosquitto_username_pw_set(mosq, mqttuser, mqttpw);
+
+#ifdef WITH_TLS
 	if (certfile || keyfile) {
 		if (!certfile || !keyfile) {
 			fprintf(stderr, "Need both cert and key for TLS\n");
@@ -1247,9 +1335,10 @@ int main(int argc, char *argv[])
 		}
 		mosquitto_tls_set(mosq, cafile, capath, certfile, keyfile, NULL); // FIXME: callback?
 		// mosquitto_tls_opts_set()
-		// mosquitto_tls_insecure_set()
+		mosquitto_tls_insecure_set(mosq, insecure);
 		// mosquitto_tls_psk_set()
 	}
+#endif
 
 	/* connect to broker */
 	mosquitto_connect(mosq, host, port, keepalive);
@@ -1262,6 +1351,7 @@ err:
 	if (serfd > 0 && serfd != STDIN_FILENO)
 		close(serfd);
 	free(buf);
+	mosquitto_disconnect(mosq);
 	mosquitto_destroy(mosq);
 	mosquitto_lib_cleanup();
 	return ret;
