@@ -124,6 +124,7 @@ static int serial_open(const char *dev)
 	if (fd > 0) {
 		tcgetattr(fd, &terminal_data);
 		cfmakeraw(&terminal_data);
+	        cfsetspeed(&terminal_data, B2400);  // 2400 8N1
 		tcsetattr(fd, TCSANOW, &terminal_data);
 	}
 	debug("opened %s\n", dev);

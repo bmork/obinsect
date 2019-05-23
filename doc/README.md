@@ -83,7 +83,7 @@ address field is restricted to be one, two or four bytes long.
 ### COSEM decoding
 
 
-See EC 62056-7-5:2017 Annex G.1 "xDLMS APDUs used (without protection
+See IEC 62056-7-5:2017 Annex G.1 "xDLMS APDUs used (without protection
 and without general-block-transfer)" for the application protocol with
 examples.
 
