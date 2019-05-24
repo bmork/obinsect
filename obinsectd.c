@@ -1220,15 +1220,18 @@ static void usage(const char *prog)
 #endif
 
 	printf(" -d : enable debugging\n");
+	printf(" -s : serial device connected to M-Bus. E.g /dev/ttyUSB0. Use '-' to read from stdin\n");
+
+	printf("\nMQTT client options:\n");
 	printf(" -h : MQTT host. Default is localhost\n");
 	printf(" -i : MQTT id\n");
 	printf(" -k : MQTT keepalive in seconds. Default is 60\n");
-	printf(" -p : MQTT port. Default is 1883 (8883 for TLS)\n");
+	printf(" -p : MQTT port. Default is 1883 (8883 when using MQTTS)\n");
 	printf(" -P : MQTT password\n");
-	printf(" -s : serial device connected to M-Bus\n");
 	printf(" -u : MQTT username\n");
 
 #ifdef WITH_TLS
+	printf("\nOnly for MQTTS (MQTT over TLS):\n");
 	printf(" --insecure : do not check MQTT broker certificate hostname\n");
 	printf(" --cafile   : path to trusted CA certificates file\n");
 	printf(" --capath   : path to trusted CA certificates directory\n");
