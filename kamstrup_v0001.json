@@ -1,0 +1,20 @@
+[
+    { "1-1:0.2.129.255" : { "name" : "ListId", "value" : "Kamstrup_V0001" } },
+    { "1-1:0.0.5.255"   : { "name" : "SerialNumber" } },
+    { "1-1:96.1.1.255"  : { "name" : "Model" } },
+    { "1-1:1.7.0.255"   : { "name" : "Power",               "unit" : "kW", "scale" : 1000 } },
+    { "1-1:2.7.0.255"   : { "name" : "PowerExport",         "unit" : "kW", "scale" : 1000 } },
+    { "1-1:3.7.0.255"   : { "name" : "ReactivePower",       "unit" : "kW", "scale" : 1000 } },
+    { "1-1:4.7.0.255"   : { "name" : "ReactivePowerExport", "unit" : "kW", "scale" : 1000 } },
+    { "1-1:31.7.0.255"  : { "name" : "CurrentL1",           "unit" :  "A", "scale" :  100 } },
+    { "1-1:51.7.0.255"  : { "name" : "CurrentL2",           "unit" :  "A", "scale" :  100 } },
+    { "1-1:71.7.0.255"  : { "name" : "CurrentL3",           "unit" :  "A", "scale" :  100 } },
+    { "1-1:32.7.0.255"  : { "name" : "VoltageL1",           "unit" :  "V", "scale" :    1 } },
+    { "1-1:52.7.0.255"  : { "name" : "VoltageL2",           "unit" :  "V", "scale" :    1 } },
+    { "1-1:72.7.0.255"  : { "name" : "VoltageL3",           "unit" :  "V", "scale" :    1 } },
+    { "0-1:1.0.0.255"   : { "name" : "MeterTime" } },
+    { "1-1:1.8.0.255"   : { "name" : "CumulativeEnergy",               "unit" : "kWh",   "scale" : 100 } },
+    { "1-1:2.8.0.255"   : { "name" : "CumulativeEnergyExport",         "unit" : "kWh",   "scale" : 100 } },
+    { "1-1:3.8.0.255"   : { "name" : "CumulativeReactiveEnergy",       "unit" : "kVArh", "scale" : 100 } },
+    { "1-1:4.8.0.255"   : { "name" : "CumulativeReactiveEnergyExport", "unit" : "kVArh", "scale" : 100 } }
+]
