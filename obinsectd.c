@@ -1212,7 +1212,6 @@ static void usage(const char *prog)
 	printf("%s version %s, using libmosquitto %u.%u.%u\n", prog, VERSION, maj, min, rev);
 	printf("Usage: %s [-d] -s device\n", prog);
 	printf("                     [-h host] [-p port] [-u username [-P password]]\n");
-	printf("                     [-i id] [-k keepalive]\n");
 #ifdef WITH_TLS
 	printf("                     [-i id] [-k keepalive] [--insecure]\n");
 	printf("                     [{--cafile file | --capath dir} [--cert file] [--key file]\n");
