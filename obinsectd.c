@@ -670,7 +670,7 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 	p++;
 
 	/* don't bother decoding the individual bits of long-invoke-id-and-priority */
-	invokeid = p[0] << 24 | buf[1] << 16 | buf[2] << 8 | buf[3];
+	invokeid = p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
 	p += 4;
 
 	/* some buggy firmwares includes a 0x09 type byte before the date-time - skip it */
