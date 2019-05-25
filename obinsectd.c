@@ -1418,7 +1418,7 @@ static void set_publish(json_object *pub, const char *key, json_object *arraynam
 
 static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 {
-	json_object *topics, *array, *publish, *arrayname;
+	json_object *topics, *publish, *arrayname;
 	int i, idx = 0;
 	const char *name;
 
@@ -1429,32 +1429,29 @@ static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 	/* unconditionally add parent nodes */
 	publish = json_object_new_object();
 	json_object_object_add(cfg, "publish", publish);
-	array = json_object_new_object();
-	json_object_object_add(cfg, "arrays",  array);
 
 	/* create a flat set of all keys to be published */
 	json_object_object_foreach(topics, t, tmp) {
 		/* tmp is one of three different types: OBIS code, symbolic alias, or array */
+		debug("looking at topic '%s'\n", t);
 
 		if (json_object_is_type(tmp, json_type_array)) {
 			/* 1. move to arrays */
 			idx++;
 			snprintf(buf, bufsize, "__array_%u", idx);
-			json_object_object_add(array, buf,  json_object_get(tmp));
 			arrayname = json_object_new_string(buf);
 
 			/* 2. add keys to array */
 			for (i = 0; i < json_object_array_length(tmp); i++) {
 				name = json_object_get_string(json_object_array_get_idx(tmp, i));
+				/* prevent morons from nesting */
+				if (!strncmp(name, "__array",7))
+					continue;
 				set_publish(publish, name, arrayname);
 			}
 
 			/* 3. replace the original topic value with the array name */
-			name = strdup(t);
-			json_object_object_del(topics, t);
-			json_object_object_add(topics, name,  arrayname);
-			free((char *)name);
-
+			json_object_object_add(topics, t,  arrayname);
 		} else {
 			name = json_object_get_string(tmp);
 			set_publish(publish, name, NULL);
