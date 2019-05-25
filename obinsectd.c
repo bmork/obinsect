@@ -68,7 +68,7 @@ static void print_packet(const char *pfx, void *buf, int len)
 	int i;
 	unsigned char *p = buf;
 
-	fprintf(stderr, "%s", pfx);
+	fprintf(stderr, "*** %s ***\n", pfx);
 	for (i=0; i<len; i++)
 		fprintf(stderr, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
 	fprintf(stderr, "\n");
@@ -949,7 +949,7 @@ static const char *obis_lookup(const char *list, int idx)
 	return "unknown";
 }
 
-/* some OBIS codes use "wrong" types - fixup for normailization */
+/* some OBIS codes use "wrong" types - fixup for normalization */
 static json_object *obis_get_val(const char *key, json_object *val)
 {
 	/*
@@ -1035,7 +1035,6 @@ static void add_obis(json_object *pubcfg, json_object *pub, const char *key, jso
 	json_object *normal, *newval = val;
 	double scale = get_scale(key);
 
-	debug("*** adding %s ***\n", key);
 	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
 		set_current_list(json_object_get_string(val));
 	if (scale)
@@ -1056,13 +1055,16 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 	json_object *ret, *tmp, *notification, *body;
 
 	/* 1. figure out list format */
-	if (!json_object_object_get_ex(json, "data-notification", &notification))
-		return NULL;
-	if (!json_object_object_get_ex(notification, "notification-body", &body))
-		return NULL;
 
 	/* create a new object for the results */
 	ret = json_object_new_object();
+
+	if (!json)
+		return ret;
+	if (!json_object_object_get_ex(json, "data-notification", &notification))
+		return ret;
+	if (!json_object_object_get_ex(notification, "notification-body", &body))
+		return ret;
 
 	/* create a "normal" result list with all OBIS codes as keys? */
 	if (json_object_object_get_ex(pubcfg, "normal", NULL))
@@ -1165,7 +1167,6 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 
 		json_object_object_foreach(body, key, val) {
 			i++;
-			debug("*** code %u ***\n", i);
 			if (n == 1)
 				/* the simplest Aidon and Kaifa list
 				 * has only a single value:
@@ -1232,16 +1233,16 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 	return 0;
 }
 
-static void add_raw_packet(json_object *pubcfg, json_object *pubdata, unsigned char *p, size_t plen)
+static void add_hexdump(json_object *pubcfg, json_object *pubdata, const char *type, unsigned char *p, size_t plen)
 {
 	int i, pos = 0;
 
-	print_packet("*** raw packet:\n", p, plen);
+	print_packet(type, p, plen);
 	if (!printbuffer)
 		return;
 
 	/* shortcut to avoid unnecessary formatting */
-	if (!json_object_object_get_ex(pubcfg, "rawhexdump", NULL))
+	if (!json_object_object_get_ex(pubcfg, type, NULL))
 		return;
 
 	for (i=0; i<plen; i++) {
@@ -1253,7 +1254,7 @@ static void add_raw_packet(json_object *pubcfg, json_object *pubdata, unsigned c
 			break;
 		}
 	}
-	add_keyval(pubcfg, pubdata, "rawhexdump", json_object_new_string_len(printbuffer, pos), true);
+	add_keyval(pubcfg, pubdata, type, json_object_new_string_len(printbuffer, pos), true);
 }
 
 static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, size_t rbuflen)
@@ -1325,7 +1326,11 @@ nextframe:
 		payload = hdlc_verify(hdlc, framelen + 2, &json);
 		if (!payload) {
 skipframe:
-			print_packet("*** dropping bogus frame: ***\n", hdlc, framelen > 0 ? framelen + 2 : 64);
+			/* possibly publish dropped frame */
+			pubdata = normalize(pubcfg, NULL);
+			add_hexdump(pubcfg, pubdata, "dropped", hdlc, framelen > 0 ? framelen + 2 : 64);
+			publish(mosq, pubdata);
+			json_object_put(pubdata);
 
 			/* we only skip the initial CONTROL char in case the real frame starts somewhere inside the bogus one */
 			memmove(rbuf, hdlc + 1, cur - hdlc - 1);
@@ -1337,7 +1342,7 @@ skipframe:
 		/* got a complete and verified frame - parse the payload */
 		if (parse_payload(payload, framelen - (payload - hdlc + 1), json)) {
 			pubdata = normalize(pubcfg, json);
-			add_raw_packet(pubcfg, pubdata, hdlc, framelen + 2);
+			add_hexdump(pubcfg, pubdata, "rawhexdump", hdlc, framelen + 2);
 			add_keyval(pubcfg, pubdata, "full", json, true);
 
 			/* add some local metadata */
@@ -1354,6 +1359,7 @@ skipframe:
 
 		/* and drop it */
 		json_object_put(json);
+		json_object_put(pubdata);
 
 		/* keep remaining data for next frame, including the stop marker in case it doubles as start of next frame */
 		memmove(rbuf, hdlc + framelen + 1, cur - rbuf - framelen + 1);
@@ -1365,11 +1371,10 @@ skipframe:
 	}
 
 
-/* parse configuration and build some helper structures;
-
+/* parse configuration and build some helper structures
 
 "publish" is a set of keys which are be considered for publishing. The
-value is a possibly empyt list of arrays containing this key.
+value is a, possibly empty, list of arrays containing this key.
 
    "publish": {
       "key1" : [ "__array_2" ],
@@ -1377,33 +1382,17 @@ value is a possibly empyt list of arrays containing this key.
       "key3" : [ "__array_1" ],
     }
 
-"arrays" is a set of made up array names and their respective real key content
 
-    "arrays": {
-       "__array_1": [ "key3" ],
-       "__array_2": [ "key1" ],
-     }
+The original topic value is replaced by the array name,
 
-The original topic value is replaced by the  made up array name,
-
-This allows us to efficiently create structures for publishing while parsing:
-
-  Considering key = "foo", value = "bar":
-
-    for k in "foo" and all aliases of foo:
-     if "publish"->{k} exists, then 
-        1. add k => "bar" to master publishset
-	2. for all set bits:
-	    add "__array_(bit)" => array(bit) object to master publishset
-            add k => "bar" to array(bit) object
+When processing parsed data, matching keys are included in the master
+publish set as well as in any listed array publish set.
 
 When publishing, we can simply loop through the list of topics and
-publish if there is a corresponding value in the master publishset,
-without having to consider aliases or arrays.
-
+publish the matching objects in the master publishset, without
+considering the type of object.
 
  */
-
 static void set_publish(json_object *pub, const char *key, json_object *arrayname)
 {
 	json_object *tmp;
@@ -1433,8 +1422,6 @@ static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 	/* create a flat set of all keys to be published */
 	json_object_object_foreach(topics, t, tmp) {
 		/* tmp is one of three different types: OBIS code, symbolic alias, or array */
-		debug("looking at topic '%s'\n", t);
-
 		if (json_object_is_type(tmp, json_type_array)) {
 			/* 1. move to arrays */
 			idx++;
@@ -1486,7 +1473,6 @@ static json_object *parse_obisfile(json_object *lists, const char *fname, char *
 	if (!tmp)
 		return NULL;
 
-	debug("parsed %s\n", fname);
 	json_object_object_foreach(tmp, key, val) {
 		/* FIXME: ignoring for now... */
 		if (!strcmp("_metadata", key))
