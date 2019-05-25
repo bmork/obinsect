@@ -49,12 +49,32 @@
 /* parsed configuration */
 static json_object *cfg = NULL;
 
-
 #define BUFSIZE (1024 * 2)
+
+/* maximum number of OBIS codes in each list (-1) */
+#define MAX_OBISCODES 32
+
+/* maximum number of OBIS lists supported */
+#define MAX_LISTS 4
+
+struct obisfile {
+	size_t n;
+	const char *filename;
+	const char *listname;
+	char *code[MAX_OBISCODES];
+	const char *alias[MAX_OBISCODES];
+	const char *unit[MAX_OBISCODES];
+	int scale[MAX_OBISCODES];
+};
+
+static int current_list = 0;		       		/* currently selected list */
+static struct obisfile *obisfiles[MAX_LISTS] = { };	/* parsed OBIS lists */
 
 #ifdef DEBUG
 static bool debug = true;
+
 #define debug(arg...) fprintf(stderr, arg)
+
 static void print_packet(const char *pfx, void *buf, int len)
 {
 	int i;
@@ -65,10 +85,19 @@ static void print_packet(const char *pfx, void *buf, int len)
 		fprintf(stderr, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
 	fprintf(stderr, "\n");
 }
+
+static void libmosquitto_log_callback(struct mosquitto *mosq, void *userdata, int level, const char *str)
+{
+	debug("<%i> %s\n", level, str);
+}
+
 #else
 static bool debug = false;
+
 #define debug(arg...)
+
 #define print_packet(pfx, buf, len)
+
 #endif /* DEBUG */
 
 /*
@@ -909,6 +938,10 @@ f) Kamstrup list 2:
 
 static const char *obis_lookup(const char *list, int idx)
 {
+	struct obisfile *cur = obisfiles[current_list];
+	if (idx < 0 || idx > cur->n)
+		return "unknown";
+	return cur->code[idx];
 	switch (idx) {
 	case 1: return "1-1:0.2.129.255";
 	case 2: return "0-0:96.1.0.255";
@@ -942,7 +975,57 @@ static json_object *obis_get_val(const char *key, json_object *val)
 	return json_object_get(val);
 }
 
-static json_object *normalize(json_object *json)
+
+static const char *get_alias(const char *key)
+{
+	return NULL;
+}
+
+static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, json_object *val, bool createobj)
+{
+	json_object *tmp, *obj;
+	const char *arrayname;
+	int i;
+
+	if (!json_object_object_get_ex(pubcfg, key, &tmp))
+		return;
+
+	json_object_object_add(pub, key, val);
+	for (i = 0; i < json_object_array_length(tmp); i++) {
+		arrayname = json_object_get_string(json_object_array_get_idx(tmp, i));
+
+		/* get existing object */
+		if (!json_object_object_get_ex(pub, arrayname, &obj)) {
+			/* values like "timestamp" will not trigger publication alone */
+			if (!createobj) {
+				debug("Skipping field '%s' in array '%s' due to non-existing array\n", key, arrayname);
+				continue;
+			}
+
+			/* publish new array? */
+			obj = json_object_new_object();
+			json_object_object_add(pub, arrayname, obj);
+		}
+		json_object_object_add(obj, key, val);
+	}
+}
+
+static void add_obis(json_object *pubcfg, json_object *pub, const char *key, json_object *val)
+{
+	const char *alias = get_alias(key);
+	json_object *normal;
+
+	if (json_object_object_get_ex(pub, "normal", &normal))
+		json_object_object_add(normal, key, val);
+	add_keyval(pubcfg, pub, key, val, true);
+	if (alias)
+		add_keyval(pubcfg, pub, alias, val, true);
+}
+
+/*
+ * post process the parsed packet, converting the data to simple key => value pairs
+ */
+static json_object *normalize(json_object *pubcfg, json_object *json)
 {
 	json_object *ret, *tmp, *notification, *body;
 
@@ -952,14 +1035,16 @@ static json_object *normalize(json_object *json)
 	if (!json_object_object_get_ex(notification, "notification-body", &body))
 		return NULL;
 
+	/* create a new object for the results */
 	ret = json_object_new_object();
 
-	/* add some local metadata */
-	json_object_object_add(ret, "timestamp", json_object_new_int(time(NULL)));
+	/* create a "normal" result list with all OBIS codes as keys? */
+	if (json_object_object_get_ex(pubcfg, "normal", NULL))
+		json_object_object_add(ret, "normal", json_object_new_object());
 
 	/* include the message time-stamp if available and not 0 */
 	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
-		json_object_object_add(ret, "date-time", json_object_get(tmp));
+		add_keyval(pubcfg, ret, "date-time", json_object_get(tmp), true);
 
 	/* overall formatting differs between the 3:
 
@@ -1047,7 +1132,7 @@ static json_object *normalize(json_object *json)
 					myval = val;
 			}
 			if (mykey && myval)
-				json_object_object_add(ret, mykey, obis_get_val(mykey, myval));
+				add_obis(pubcfg, ret, mykey, obis_get_val(mykey, myval));
 		}
 	} else {
 		const char *mykey = NULL;
@@ -1062,55 +1147,40 @@ static json_object *normalize(json_object *json)
 				 * has only a single value:
 				 *  - Active power+ (Q1+Q4) in kW
 				 */
-				json_object_object_add(ret, "1-0:1.7.0.255", json_object_get(val));
+				add_obis(pubcfg, ret, "1-0:1.7.0.255", json_object_get(val));
 			else if (!listname) {
 				/* the list name is always the first value of any multi-element list */
 				listname = json_object_get_string(val);
-				json_object_object_add(ret, obis_lookup(listname, 1), json_object_get(val));
+				add_obis(pubcfg, ret, obis_lookup(listname, 1), json_object_get(val));
 			}
 			else if (!strncmp(key, "obis", 4))
 				mykey = json_object_get_string(val);
 			else
 				/* "mykey" is the obis code for Kamstrup lists. Look up by index for Kaifa lists */
-				json_object_object_add(ret, mykey ? mykey : obis_lookup(listname, i), obis_get_val(mykey, val));
+				add_obis(pubcfg, ret,  mykey ? mykey : obis_lookup(listname, i), obis_get_val(mykey, val));
 		}
 	}
 
 	return ret;
 }
 
-static json_object *get_value(json_object *val, json_object *json, json_object *normal,  unsigned char *raw, size_t rawlen)
+static json_object *get_value(json_object *val, json_object *values)
 {
-	char *type;
+	json_object *ret;
 
-	if (json_object_is_type(val, json_type_array)) {
-		return NULL; // FIXME!
-	}
-	type = json_object_get_string(val);
-	if (!strncmp(key, "rawhexdump", 4)) {
-		return NULL; // FIXME!
-	} else if (!strncmp(key, "full", 4)) {
-		return json_object_get(json);
-	} else if (!strncmp(key, "normal", 4)) {
-		return json_object_get(normal);
-	} else if (json_object_object_get_ex(normal, key, &val)) // OBIS codes and timestamp
-		return json_object_get(val);
-	}
+	if (json_object_object_get_ex(values, json_object_get_string(val), &ret))
+		return ret;
 	return NULL;
 }
 
 // FIMXE: topic, qos and variable mapping should be configurable - json config file?
-static int publish(struct mosquitto *mosq, json_object *json, json_object *normal, unsigned char *raw, size_t rawlen)
+static int publish(struct mosquitto *mosq, json_object *pubdata)
 {
 	static int mid = 1;
 	const char *pub;
-	char *t;
 	size_t publen;
 	json_object *topics, *val;
 
-	print_packet("*** raw packet:\n", raw, rawlen);
-	debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
-	debug("*** normal:\n%s\n", json_object_to_json_string_ext(normal, JSON_C_TO_STRING_PRETTY));
 
 	// * requires libjson-c version 0.13+
 	// pub = json_object_to_json_string_length(normal, JSON_C_TO_STRING_PLAIN, &publen);
@@ -1119,18 +1189,35 @@ static int publish(struct mosquitto *mosq, json_object *json, json_object *norma
 	if (!cfg || !json_object_object_get_ex(cfg, "topicmap", &topics))
 		return 0;
 
-	json_object_object_foreach(topics, t, val) {
-		val = get_value(val, json, normal, raw, rawlen);
+	json_object_object_foreach(topics, t, tmp) {
+		val = get_value(tmp, pubdata);
 		if (!val)
 			continue;
-		publen = strlen(pub);
 		pub = json_object_to_json_string_ext(val, JSON_C_TO_STRING_PLAIN);
 		publen = strlen(pub);
 		mosquitto_publish(mosq, &mid, t, publen, pub, 0, false);
-		json_object_put(val);
 	}
 
 	return 0;
+}
+
+static void add_raw_packet(json_object *pubcfg, json_object *pubdata, unsigned char *p, size_t plen)
+{
+	int i, pos = 0;
+	char printbuf[1024];
+
+	print_packet("*** raw packet:\n", p, plen);
+
+	/* shortcut to avoid printing unused data */
+	if (!json_object_object_get_ex(pubcfg, "rawhexdump", NULL))
+		return;
+
+	for (i=0; i<plen; i++) {
+		pos += snprintf(printbuf + pos, sizeof(printbuf) - pos, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
+		if (pos >= sizeof(printbuf))
+			break;
+	}
+	add_keyval(pubcfg, pubdata, "rawhexdump", json_object_new_string_len(printbuf, pos), true);
 }
 
 static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, size_t rbuflen)
@@ -1138,7 +1225,11 @@ static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, s
 	unsigned char *payload, *cur, *hdlc;
 	struct pollfd fds[1];
 	int ret, rlen, framelen = -1;
-	json_object *json;
+	json_object *json, *pubcfg, *pubdata;
+
+	/* get the publish config */
+	if (!json_object_object_get_ex(cfg, "publish", &pubcfg))
+		pubcfg = NULL;
 
 	fds[0].fd = fd;
 	fds[0].events = POLLIN;
@@ -1208,8 +1299,22 @@ skipframe:
 		}
 
 		/* got a complete and verified frame - parse the payload */
-		if (parse_payload(payload, framelen - (payload - hdlc + 1), json))
-			publish(mosq, json, normalize(json), hdlc, framelen + 2);
+		if (parse_payload(payload, framelen - (payload - hdlc + 1), json)) {
+			pubdata = normalize(pubcfg, json);
+			add_raw_packet(pubcfg, pubdata, hdlc, framelen + 2);
+			add_keyval(pubcfg, pubdata, "full", json, true);
+
+			/* add some local metadata */
+			add_keyval(pubcfg, pubdata, "timestamp", json_object_new_int(time(NULL)), false);
+//	add_keyval(pubcfg, ret, "current-list", , false);
+//	add_keyval(pubcfg, ret, "runtime", , false);
+//	add_keyval(pubcfg, ret, "packets", , false);
+
+			debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+			debug("*** pubdatal:\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
+
+			publish(mosq, pubdata);
+		}
 
 		/* and drop it */
 		json_object_put(json);
@@ -1221,23 +1326,222 @@ skipframe:
 		goto nextframe;
 	}
 	return 0;
+	}
+
+
+/* parse configuration and build some helper structures;
+
+
+"publish" is a set of keys which are be considered for publishing. The
+value is a possibly empyt list of arrays containing this key.
+
+   "publish": {
+      "key1" : [ "__array_2" ],
+      "key2" : [],
+      "key3" : [ "__array_1" ],
+    }
+
+"arrays" is a set of made up array names and their respective real key content
+
+    "arrays": {
+       "__array_1": [ "key3" ],
+       "__array_2": [ "key1" ],
+     }
+
+The original topic value is replaced by the  made up array name,
+
+This allows us to efficiently create structures for publishing while parsing:
+
+  Considering key = "foo", value = "bar":
+
+    for k in "foo" and all aliases of foo:
+     if "publish"->{k} exists, then 
+        1. add k => "bar" to master publishset
+	2. for all set bits:
+	    add "__array_(bit)" => array(bit) object to master publishset
+            add k => "bar" to array(bit) object
+
+When publishing, we can simply loop through the list of topics and
+publish if there is a corresponding value in the master publishset,
+without having to consider aliases or arrays.
+
+
+ */
+
+static void set_publish(json_object *pub, const char *key, json_object *arrayname)
+{
+	json_object *tmp;
+
+	if (!json_object_object_get_ex(pub, key, &tmp)) {
+		tmp = json_object_new_array();
+		json_object_object_add(pub, key, tmp);
+	}
+	if (arrayname)
+		json_object_array_add(tmp, arrayname);
 }
 
-
-static json_object *read_config(const char *fname, unsigned char *buf, size_t bufsize)
+static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 {
-	int fd = open(fname, O_RDONLY);
+	json_object *topics, *array, *publish, *arrayname;
+	int i, idx = 0;
+	const char *name;
+
+	/* nothing published unless configured */
+	if (!cfg || !json_object_object_get_ex(cfg, "topicmap", &topics))
+		return;
+
+	/* unconditionally add parent nodes */
+	publish = json_object_new_object();
+	json_object_object_add(cfg, "publish", publish);
+	array = json_object_new_object();
+	json_object_object_add(cfg, "arrays",  array);
+
+	/* create a flat set of all keys to be published */
+	json_object_object_foreach(topics, t, tmp) {
+		/* tmp is one of three different types: OBIS code, symbolic alias, or array */
+
+		if (json_object_is_type(tmp, json_type_array)) {
+			/* 1. move to arrays */
+			idx++;
+			snprintf(buf, bufsize, "__array_%u", idx);
+			json_object_object_add(array, buf,  json_object_get(tmp));
+			arrayname = json_object_new_string(buf);
+
+			/* 2. set bits on all keys in array */
+			for (i = 0; i < json_object_array_length(tmp); i++) {
+				name = json_object_get_string(json_object_array_get_idx(tmp, i));
+				set_publish(publish, name, arrayname);
+			}
+
+			/* 3. replace the original topic value with the array name */
+			name = strdup(t);
+			json_object_object_del(topics, t);
+			json_object_object_add(topics, name,  arrayname);
+			free((char *)name);
+
+		} else {
+			name = json_object_get_string(tmp);
+			set_publish(publish, name, NULL);
+		}
+	}
+}
+
+static json_object *read_json_file(const char *fname, char *buf, size_t bufsize)
+{
+	int fd;
 	ssize_t len;
 
+	fd = open(fname, O_RDONLY);
 	if (fd < 0)
 		return NULL;
 
-	len = read(fd, buf, buflen);
+	len = read(fd, buf, bufsize);
 	close(fd);
 	if (len <= 0)
 		return NULL;
 
 	return json_tokener_parse(buf);
+}
+
+/* we create indexed lookup arrays for each list */
+
+static struct obisfile *parse_obisfile(json_object *cfg, const char *fname, char *buf, size_t bufsize)
+{
+	json_object *tmp;
+	struct obisfile *ret;
+	int i = 0;
+
+	tmp = read_json_file(fname, buf, bufsize);
+	if (!tmp)
+		return NULL;
+
+	/* save parsed file in config */
+	json_object_object_add(cfg, fname, tmp);
+
+	/* allocate a new obisfile struct */
+	ret = malloc(sizeof(struct obisfile));
+	if (!ret)
+		return NULL;
+
+	debug("parsed %s\n", fname);
+	memset(ret, 0, sizeof(struct obisfile));
+	memset(ret->scale, 1, sizeof(ret->scale));
+	ret->filename = fname;
+	json_object_object_foreach(tmp, code, obisobject) {
+		i++;
+		if (i >= MAX_OBISCODES)
+			continue;
+		ret->code[i] = code;
+		ret->n = i;
+		json_object_object_foreach(obisobject, key, val) {
+			if (!strncmp(key, "name", 4))
+				ret->alias[i] = json_object_get_string(val);
+			else if (!strncmp(key, "value", 5) && !strncmp(code, "1-1:0.2.129.255", 15))
+				ret->listname = json_object_get_string(val);
+			else if (!strncmp(key, "unit", 4))
+				ret->unit[i] = json_object_get_string(val);
+			else if (!strncmp(key, "scale", 5))
+				ret->scale[i] = json_object_get_int(val);
+		}
+	}
+	return ret;
+}
+
+/*
+ * free memory allocated outside libjson-c. Strings returned by
+ * libjson-c will be freed when the json object refcount goes to zero
+ */
+static void free_obisfiles()
+{
+	struct obisfile *tmp;
+	int i;
+
+	for (i = 0; i < MAX_LISTS; i++) {
+		tmp = obisfiles[i];
+		obisfiles[i] = NULL;
+		if (!tmp)
+			continue;
+		free(tmp);
+	}
+}
+
+static json_object *read_config(const char *fname, char *buf, size_t bufsize)
+{
+	json_object *tmp, *obis, *ret;
+	const char *name;
+	int i, count = 0;
+
+	ret = read_json_file(fname, buf, bufsize);
+	if (!ret)
+		return NULL;
+
+	/* support rereading config */
+	free_obisfiles();
+
+	/* read all the OBIS definitions so we can look up aliases */
+	if (json_object_object_get_ex(ret, "obisdefs", &tmp) && json_object_is_type(tmp, json_type_array)) {
+		/* create an object for the parsed files */
+		obis = json_object_new_object();
+		json_object_object_add(ret, "obisfiles", obis);
+
+		for (i = 0; i < json_object_array_length(tmp); i++) {
+			name = json_object_get_string(json_object_array_get_idx(tmp, i));
+			if (count >= MAX_LISTS) {
+				fprintf(stderr, "Too many 'obisdefs' - ignoring '%s'\n", name);
+				continue;
+			}
+			obisfiles[count] = parse_obisfile(obis, name, buf, bufsize);
+
+			/* increase counter only if the file could be parsed */
+			if (obisfiles[count])
+				count++;
+		}
+	}
+
+	/* post process config - adding helper structures */
+	process_cfg(ret, buf, bufsize);
+
+	return ret;
 }
 
 static struct option main_options[] = {
@@ -1384,14 +1688,20 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	if (serfd < 0) {
+		usage(argv[0]);
+		return 0;
+	}
+
 	/* print banner */
 	fprintf(stderr, "%s version %s\n", argv[0], VERSION);
-
-
 
         /* initialize mqtt client and read buffer */
 	mosquitto_lib_init();
 	mosq = mosquitto_new(mqttid, clean_session, NULL);
+#ifdef DEBUG
+	mosquitto_log_callback_set(mosq, libmosquitto_log_callback);
+#endif
 	buf = malloc(BUFSIZE);
 	if (!buf || !mosq) {
 		fprintf(stderr, "Error: Out of memory.\n");
@@ -1400,9 +1710,10 @@ int main(int argc, char *argv[])
 	}
 
 	/* read config file */
-	cfg = read_config(cfgfile, buf, BUFSIZE);
+	cfg = read_config(cfgfile, (char *)buf, BUFSIZE);
 	if (!cfg)
 		fprintf(stderr, "Failed to parse '%s' - will not publish anything to '%s'\n", cfgfile, broker);
+	debug("%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
 
 	/* configure broker connection */
 	if (mqttuser)
@@ -1437,7 +1748,12 @@ err:
 
 	if (serfd > 0 && serfd != STDIN_FILENO)
 		close(serfd);
+
+	sleep(1);
 	free(buf);
+	free_obisfiles();
+	if (cfg)
+		json_object_put(cfg);
 	mosquitto_disconnect(mosq);
 	mosquitto_destroy(mosq);
 	mosquitto_lib_cleanup();
