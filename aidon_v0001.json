@@ -1,21 +1,59 @@
 {
-    "1-1:0.2.129.255" : { "name" : "ListId", "value" : "AIDON_V0001" },
-    "0-0:96.1.0.255"  : { "name" : "SerialNumber" },
-    "0-0:96.1.7.255"  : { "name" : "Model" },
-    "1-0:1.7.0.255"   : { "name" : "Power",               "unit" : "kW", "scale" : 0.001 },
-    "1-0:2.7.0.255"   : { "name" : "PowerExport",         "unit" : "kW", "scale" : 0.001 },
-    "1-0:3.7.0.255"   : { "name" : "ReactivePower",       "unit" : "kW", "scale" : 0.001 },
-    "1-0:4.7.0.255"   : { "name" : "ReactivePowerExport", "unit" : "kW", "scale" : 0.001 },
-    "1-0:31.7.0.255"  : { "name" : "CurrentL1",           "unit" :  "A", "scale" :   0.1 },
-    "1-0:51.7.0.255"  : { "name" : "CurrentL2",           "unit" :  "A", "scale" :   0.1 },
-    "1-0:71.7.0.255"  : { "name" : "CurrentL3",           "unit" :  "A", "scale" :   0.1 },
-    "1-0:32.7.0.255"  : { "name" : "VoltageL1",           "unit" :  "V", "scale" :   0.1 },
-    "1-0:52.7.0.255"  : { "name" : "VoltageL2",           "unit" :  "V", "scale" :   0.1 },
-    "1-0:72.7.0.255"  : { "name" : "VoltageL3",           "unit" :  "V", "scale" :   0.1 },
-    "0-0:1.0.0.255"   : { "name" : "MeterTime" },
-    "1-0:1.8.0.255"   : { "name" : "CumulativeEnergy",               "unit" : "kWh",   "scale" : 0.01 },
-    "1-0:2.8.0.255"   : { "name" : "CumulativeEnergyExport",         "unit" : "kWh",   "scale" : 0.01 },
-    "1-0:3.8.0.255"   : { "name" : "CumulativeReactiveEnergy",       "unit" : "kVArh", "scale" : 0.01 },
-    "1-0:4.8.0.255"   : { "name" : "CumulativeReactiveEnergyExport", "unit" : "kVArh", "scale" : 0.01 }
+    "_metadata": {
+	"revision": 1
+    },
+    "AIDON_V0001":{
+      "alias":{
+        "1-1:0.2.129.255":"ListId",
+        "0-0:96.1.0.255":"SerialNumber",
+        "0-0:96.1.7.255":"Model",
+        "1-0:1.7.0.255":"Power",
+        "1-0:2.7.0.255":"PowerExport",
+        "1-0:3.7.0.255":"ReactivePower",
+        "1-0:4.7.0.255":"ReactivePowerExport",
+        "1-0:31.7.0.255":"CurrentL1",
+        "1-0:51.7.0.255":"CurrentL2",
+        "1-0:71.7.0.255":"CurrentL3",
+        "1-0:32.7.0.255":"VoltageL1",
+        "1-0:52.7.0.255":"VoltageL2",
+        "1-0:72.7.0.255":"VoltageL3",
+        "0-0:1.0.0.255":"MeterTime",
+        "1-0:1.8.0.255":"CumulativeEnergy",
+        "1-0:2.8.0.255":"CumulativeEnergyExport",
+        "1-0:3.8.0.255":"CumulativeReactiveEnergy",
+        "1-0:4.8.0.255":"CumulativeReactiveEnergyExport"
+      },
+      "unit":{
+        "1-0:1.7.0.255":"kW",
+        "1-0:2.7.0.255":"kW",
+        "1-0:3.7.0.255":"kW",
+        "1-0:4.7.0.255":"kW",
+        "1-0:31.7.0.255":"A",
+        "1-0:51.7.0.255":"A",
+        "1-0:71.7.0.255":"A",
+        "1-0:32.7.0.255":"V",
+        "1-0:52.7.0.255":"V",
+        "1-0:72.7.0.255":"V",
+        "1-0:1.8.0.255":"kWh",
+        "1-0:2.8.0.255":"kWh",
+        "1-0:3.8.0.255":"kVArh",
+        "1-0:4.8.0.255":"kVArh"
+      },
+      "scale":{
+        "1-0:1.7.0.255":0.001,
+        "1-0:2.7.0.255":0.001,
+        "1-0:3.7.0.255":0.001,
+        "1-0:4.7.0.255":0.001,
+        "1-0:31.7.0.255":0.1,
+        "1-0:51.7.0.255":0.1,
+        "1-0:71.7.0.255":0.1,
+        "1-0:32.7.0.255":0.1,
+        "1-0:52.7.0.255":0.1,
+        "1-0:72.7.0.255":0.1,
+        "1-0:1.8.0.255":0.01,
+        "1-0:2.8.0.255":0.01,
+        "1-0:3.8.0.255":0.01,
+        "1-0:4.8.0.255":0.01
+      }
+    }
 }
-

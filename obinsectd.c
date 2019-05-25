@@ -1483,48 +1483,26 @@ static json_object *read_json_file(const char *fname, char *buf, size_t bufsize)
 
 static json_object *parse_obisfile(json_object *lists, const char *fname, char *buf, size_t bufsize)
 {
-	json_object *tmp, *l, *alias, *unit, *scale;
-	const char *listname = NULL;
-	int i = 0;
+	json_object *tmp;
 
 	tmp = read_json_file(fname, buf, bufsize);
 	if (!tmp)
 		return NULL;
 
 	debug("parsed %s\n", fname);
-
-	l = json_object_new_object();
-	alias = json_object_new_object();
-	unit = json_object_new_object();
-	scale = json_object_new_object();
-	json_object_object_add(l, "alias",  alias);
-	json_object_object_add(l, "unit",  unit);
-	json_object_object_add(l, "scale",  scale);
-
-	json_object_object_foreach(tmp, code, obisobject) {
-		i++;
-		json_object_object_foreach(obisobject, key, val) {
-			if (!strncmp(key, "name", 4))
-				json_object_object_add(alias, code, val);
-			else if (!strncmp(key, "value", 5) && !strncmp(code, "1-1:0.2.129.255", 15))
-				listname = json_object_get_string(val);
-			else if (!strncmp(key, "unit", 4))
-				json_object_object_add(unit, code, val);
-			else if (!strncmp(key, "scale", 5))
-				json_object_object_add(scale, code, val);
-		}
+	json_object_object_foreach(tmp, key, val) {
+		/* FIXME: ignoring for now... */
+		if (!strcmp("_metadata", key))
+			continue;
+		json_object_object_add(lists, key, val);
 	}
-
-	/* save parsed file in config */
-	if (listname)
-		json_object_object_add(lists, listname, l);
 
 	return tmp;
 }
 
 static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 {
-	json_object *tmp, *obis, *list, *ret, *parsed;
+	json_object *tmp, *list, *ret;
 	const char *name;
 	int i           ;
 
@@ -1534,18 +1512,12 @@ static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 
 	/* read all the OBIS definitions so we can look up aliases */
 	if (json_object_object_get_ex(ret, "obisdefs", &tmp) && json_object_is_type(tmp, json_type_array)) {
-		/* create an object for the parsed files */
-		obis = json_object_new_object();
-		json_object_object_add(ret, "obisfiles", obis);
-
 		list = json_object_new_object();
 		json_object_object_add(ret, "obislists", list);
 
 		for (i = 0; i < json_object_array_length(tmp); i++) {
 			name = json_object_get_string(json_object_array_get_idx(tmp, i));
-			parsed = parse_obisfile(list, name, buf, bufsize);
-			if (parsed)
-				json_object_object_add(obis, name, parsed);
+			parse_obisfile(list, name, buf, bufsize);
 		}
 	}
 
