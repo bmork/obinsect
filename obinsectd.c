@@ -49,26 +49,10 @@
 /* parsed configuration */
 static json_object *cfg = NULL;
 
+/* current OBIS list */
+static json_object *current_list = NULL;
+
 #define BUFSIZE (1024 * 2)
-
-/* maximum number of OBIS codes in each list (-1) */
-#define MAX_OBISCODES 32
-
-/* maximum number of OBIS lists supported */
-#define MAX_LISTS 4
-
-struct obisfile {
-	size_t n;
-	const char *filename;
-	const char *listname;
-	char *code[MAX_OBISCODES];
-	const char *alias[MAX_OBISCODES];
-	const char *unit[MAX_OBISCODES];
-	int scale[MAX_OBISCODES];
-};
-
-static int current_list = 0;		       		/* currently selected list */
-static struct obisfile *obisfiles[MAX_LISTS] = { };	/* parsed OBIS lists */
 
 #ifdef DEBUG
 static bool debug = true;
@@ -938,10 +922,6 @@ f) Kamstrup list 2:
 
 static const char *obis_lookup(const char *list, int idx)
 {
-	struct obisfile *cur = obisfiles[current_list];
-	if (idx < 0 || idx > cur->n)
-		return "unknown";
-	return cur->code[idx];
 	switch (idx) {
 	case 1: return "1-1:0.2.129.255";
 	case 2: return "0-0:96.1.0.255";
@@ -975,9 +955,29 @@ static json_object *obis_get_val(const char *key, json_object *val)
 	return json_object_get(val);
 }
 
+static int get_scale(const char *key)
+{
+	json_object *scale, *ret;
+
+	if (!current_list)
+		return 1;
+	if (!json_object_object_get_ex(current_list, "scale", &scale))
+		return 1;
+	if (json_object_object_get_ex(scale, key, &ret))
+		return json_object_get_int(ret);
+	return 1;
+}
 
 static const char *get_alias(const char *key)
 {
+	json_object *alias, *ret;
+
+	if (!current_list)
+		return NULL;
+	if (!json_object_object_get_ex(current_list, "alias", &alias))
+		return NULL;
+	if (json_object_object_get_ex(alias, key, &ret))
+		return json_object_get_string(ret);
 	return NULL;
 }
 
@@ -1010,17 +1010,36 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 	}
 }
 
+static void set_current_list(const char *listname)
+{
+	json_object *lists, *ret;
+
+	if (!json_object_object_get_ex(cfg, "obislists", &lists))
+		return;
+	if (json_object_object_get_ex(lists, listname, &ret))
+		current_list = ret;
+}
+
 static void add_obis(json_object *pubcfg, json_object *pub, const char *key, json_object *val)
 {
 	const char *alias = get_alias(key);
-	json_object *normal;
+	json_object *normal, *newval = val;
+	int scale = get_scale(key);
+	double f;
 
+	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
+		set_current_list(json_object_get_string(val));
+	if (scale > 1) {
+		f = json_object_get_int(val) / scale;
+		newval = json_object_new_double(f);
+	}
 	if (json_object_object_get_ex(pub, "normal", &normal))
 		json_object_object_add(normal, key, val);
-	add_keyval(pubcfg, pub, key, val, true);
+	add_keyval(pubcfg, pub, key, newval, true);
 	if (alias)
-		add_keyval(pubcfg, pub, alias, val, true);
+		add_keyval(pubcfg, pub, alias, newval, true);
 }
+
 
 /*
  * post process the parsed packet, converting the data to simple key => value pairs
@@ -1407,7 +1426,7 @@ static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 			json_object_object_add(array, buf,  json_object_get(tmp));
 			arrayname = json_object_new_string(buf);
 
-			/* 2. set bits on all keys in array */
+			/* 2. add keys to array */
 			for (i = 0; i < json_object_array_length(tmp); i++) {
 				name = json_object_get_string(json_object_array_get_idx(tmp, i));
 				set_publish(publish, name, arrayname);
@@ -1445,78 +1464,56 @@ static json_object *read_json_file(const char *fname, char *buf, size_t bufsize)
 
 /* we create indexed lookup arrays for each list */
 
-static struct obisfile *parse_obisfile(json_object *cfg, const char *fname, char *buf, size_t bufsize)
+static json_object *parse_obisfile(json_object *lists, const char *fname, char *buf, size_t bufsize)
 {
-	json_object *tmp;
-	struct obisfile *ret;
+	json_object *tmp, *l, *alias, *unit, *scale;
+	const char *listname = NULL;
 	int i = 0;
 
 	tmp = read_json_file(fname, buf, bufsize);
 	if (!tmp)
 		return NULL;
 
-	/* save parsed file in config */
-	json_object_object_add(cfg, fname, tmp);
-
-	/* allocate a new obisfile struct */
-	ret = malloc(sizeof(struct obisfile));
-	if (!ret)
-		return NULL;
-
 	debug("parsed %s\n", fname);
-	memset(ret, 0, sizeof(struct obisfile));
-	memset(ret->scale, 1, sizeof(ret->scale));
-	ret->filename = fname;
+
+	l = json_object_new_object();
+	alias = json_object_new_object();
+	unit = json_object_new_object();
+	scale = json_object_new_object();
+	json_object_object_add(l, "alias",  alias);
+	json_object_object_add(l, "unit",  unit);
+	json_object_object_add(l, "scale",  scale);
+
 	json_object_object_foreach(tmp, code, obisobject) {
 		i++;
-		if (i >= MAX_OBISCODES)
-			continue;
-		ret->code[i] = code;
-		ret->n = i;
 		json_object_object_foreach(obisobject, key, val) {
 			if (!strncmp(key, "name", 4))
-				ret->alias[i] = json_object_get_string(val);
+				json_object_object_add(alias, code, val);
 			else if (!strncmp(key, "value", 5) && !strncmp(code, "1-1:0.2.129.255", 15))
-				ret->listname = json_object_get_string(val);
+				listname = json_object_get_string(val);
 			else if (!strncmp(key, "unit", 4))
-				ret->unit[i] = json_object_get_string(val);
+				json_object_object_add(unit, code, val);
 			else if (!strncmp(key, "scale", 5))
-				ret->scale[i] = json_object_get_int(val);
+				json_object_object_add(scale, code, val);
 		}
 	}
-	return ret;
-}
 
-/*
- * free memory allocated outside libjson-c. Strings returned by
- * libjson-c will be freed when the json object refcount goes to zero
- */
-static void free_obisfiles()
-{
-	struct obisfile *tmp;
-	int i;
+	/* save parsed file in config */
+	if (listname)
+		json_object_object_add(lists, listname, l);
 
-	for (i = 0; i < MAX_LISTS; i++) {
-		tmp = obisfiles[i];
-		obisfiles[i] = NULL;
-		if (!tmp)
-			continue;
-		free(tmp);
-	}
+	return tmp;
 }
 
 static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 {
-	json_object *tmp, *obis, *ret;
+	json_object *tmp, *obis, *list, *ret;
 	const char *name;
-	int i, count = 0;
+	int i           ;
 
 	ret = read_json_file(fname, buf, bufsize);
 	if (!ret)
 		return NULL;
-
-	/* support rereading config */
-	free_obisfiles();
 
 	/* read all the OBIS definitions so we can look up aliases */
 	if (json_object_object_get_ex(ret, "obisdefs", &tmp) && json_object_is_type(tmp, json_type_array)) {
@@ -1524,17 +1521,12 @@ static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 		obis = json_object_new_object();
 		json_object_object_add(ret, "obisfiles", obis);
 
+		list = json_object_new_object();
+		json_object_object_add(ret, "obislists", list);
+
 		for (i = 0; i < json_object_array_length(tmp); i++) {
 			name = json_object_get_string(json_object_array_get_idx(tmp, i));
-			if (count >= MAX_LISTS) {
-				fprintf(stderr, "Too many 'obisdefs' - ignoring '%s'\n", name);
-				continue;
-			}
-			obisfiles[count] = parse_obisfile(obis, name, buf, bufsize);
-
-			/* increase counter only if the file could be parsed */
-			if (obisfiles[count])
-				count++;
+			json_object_object_add(obis, name, parse_obisfile(list, name, buf, bufsize));
 		}
 	}
 
@@ -1751,7 +1743,6 @@ err:
 
 	sleep(1);
 	free(buf);
-	free_obisfiles();
 	if (cfg)
 		json_object_put(cfg);
 	mosquitto_disconnect(mosq);
