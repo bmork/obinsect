@@ -945,10 +945,15 @@ static const char *obis_lookup(const char *list, int idx)
 	return "unknown";
 }
 
+/* some OBIS codes use "wrong" types - fixup for normailization */
 static json_object *obis_get_val(const char *key, json_object *val)
 {
-	/* some OBIS codes use "wrong" types - fixup for normailization*/
-	if (!strcmp(key, "0-1:1.0.0.255") && json_object_get_string_len(val) == 12) // date-time coded as octet-string
+	/*
+	 * Both Aidon and Kaifa use "0-0:1.0.0.255" for the meter time
+	 * OBIS code, while Kamstrup use "0-1:1.0.0.255".  Aidon and
+	 * Kamstrup get the type wrong, so we have to fixup both cases
+	 */
+	if (!strcmp(key + 3, ":1.0.0.255") && json_object_get_string_len(val) == 12) // date-time coded as octet-string
 		return json_object_new_int(decode_datetime((unsigned char *)json_object_get_string(val)));
 
 	/* default to return val as-is, but with increased ref */
