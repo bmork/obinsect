@@ -1027,14 +1027,15 @@ static void add_obis(json_object *pubcfg, json_object *pub, const char *key, jso
 	int scale = get_scale(key);
 	double f;
 
+	debug("*** adding %s ***\n", key);
 	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
 		set_current_list(json_object_get_string(val));
 	if (scale > 1) {
-		f = json_object_get_int(val) / scale;
+		f = (double)json_object_get_int(val) / scale;
 		newval = json_object_new_double(f);
 	}
 	if (json_object_object_get_ex(pub, "normal", &normal))
-		json_object_object_add(normal, key, val);
+		json_object_object_add(normal, key, newval);
 	add_keyval(pubcfg, pub, key, newval, true);
 	if (alias)
 		add_keyval(pubcfg, pub, alias, newval, true);
@@ -1061,9 +1062,6 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 	if (json_object_object_get_ex(pubcfg, "normal", NULL))
 		json_object_object_add(ret, "normal", json_object_new_object());
 
-	/* include the message time-stamp if available and not 0 */
-	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
-		add_keyval(pubcfg, ret, "date-time", json_object_get(tmp), true);
 
 	/* overall formatting differs between the 3:
 
@@ -1161,6 +1159,7 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 
 		json_object_object_foreach(body, key, val) {
 			i++;
+			debug("*** code %u ***\n", i);
 			if (n == 1)
 				/* the simplest Aidon and Kaifa list
 				 * has only a single value:
@@ -1174,11 +1173,18 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 			}
 			else if (!strncmp(key, "obis", 4))
 				mykey = json_object_get_string(val);
-			else
+			else {
 				/* "mykey" is the obis code for Kamstrup lists. Look up by index for Kaifa lists */
-				add_obis(pubcfg, ret,  mykey ? mykey : obis_lookup(listname, i), obis_get_val(mykey, val));
+				if (!mykey)
+					mykey = obis_lookup(listname, i);
+				add_obis(pubcfg, ret,  mykey, obis_get_val(mykey, val));
+			}
 		}
 	}
+
+	/* include the message time-stamp if available and not 0 */
+	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
+		add_keyval(pubcfg, ret, "date-time", json_object_get(tmp), false);
 
 	return ret;
 }
