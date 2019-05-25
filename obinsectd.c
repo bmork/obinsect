@@ -52,7 +52,11 @@ static json_object *cfg = NULL;
 /* current OBIS list */
 static json_object *current_list = NULL;
 
+/* defines size of both the read buffer and the print buffer.- because I'm lazy... */
 #define BUFSIZE (1024 * 2)
+
+/* shared print buffer */
+static char *printbuffer = NULL;
 
 #ifdef DEBUG
 static bool debug = true;
@@ -1234,20 +1238,25 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 static void add_raw_packet(json_object *pubcfg, json_object *pubdata, unsigned char *p, size_t plen)
 {
 	int i, pos = 0;
-	char printbuf[1024];
 
 	print_packet("*** raw packet:\n", p, plen);
+	if (!printbuffer)
+		return;
 
-	/* shortcut to avoid printing unused data */
+	/* shortcut to avoid unnecessary formatting */
 	if (!json_object_object_get_ex(pubcfg, "rawhexdump", NULL))
 		return;
 
 	for (i=0; i<plen; i++) {
-		pos += snprintf(printbuf + pos, sizeof(printbuf) - pos, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
-		if (pos >= sizeof(printbuf))
+		pos += snprintf(printbuffer + pos, BUFSIZE - pos, "%02hhx%s", p[i], (i + 1) % 16 ? " " : "  ");
+
+		/* readjust length for the json object below in case of overflow */
+		if (pos >= BUFSIZE) {
+			pos = BUFSIZE - 1;
 			break;
+		}
 	}
-	add_keyval(pubcfg, pubdata, "rawhexdump", json_object_new_string_len(printbuf, pos), true);
+	add_keyval(pubcfg, pubdata, "rawhexdump", json_object_new_string_len(printbuffer, pos), true);
 }
 
 static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, size_t rbuflen)
@@ -1706,7 +1715,8 @@ int main(int argc, char *argv[])
 	mosquitto_log_callback_set(mosq, libmosquitto_log_callback);
 #endif
 	buf = malloc(BUFSIZE);
-	if (!buf || !mosq) {
+	printbuffer = malloc(BUFSIZE);
+	if (!buf || !printbuffer || !mosq) {
 		fprintf(stderr, "Error: Out of memory.\n");
 		ret = -ENOMEM;
 		goto err;
@@ -1752,8 +1762,9 @@ err:
 	if (serfd > 0 && serfd != STDIN_FILENO)
 		close(serfd);
 
-	sleep(1);
+	sleep(1);	/* give the mosquitto lib some time to flush remaining messages - FIXME: there gotta be a better way? */
 	free(buf);
+	free(printbuffer);
 	if (cfg)
 		json_object_put(cfg);
 	mosquitto_disconnect(mosq);
