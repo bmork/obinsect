@@ -964,17 +964,17 @@ static json_object *obis_get_val(const char *key, json_object *val)
 	return json_object_get(val);
 }
 
-static int get_scale(const char *key)
+static double get_scale(const char *key)
 {
 	json_object *scale, *ret;
 
 	if (!current_list)
-		return 1;
+		return 0;
 	if (!json_object_object_get_ex(current_list, "scale", &scale))
-		return 1;
+		return 0;
 	if (json_object_object_get_ex(scale, key, &ret))
-		return json_object_get_int(ret);
-	return 1;
+		return json_object_get_double(ret);
+	return 0;
 }
 
 static const char *get_alias(const char *key)
@@ -1033,16 +1033,13 @@ static void add_obis(json_object *pubcfg, json_object *pub, const char *key, jso
 {
 	const char *alias = get_alias(key);
 	json_object *normal, *newval = val;
-	int scale = get_scale(key);
-	double f;
+	double scale = get_scale(key);
 
 	debug("*** adding %s ***\n", key);
 	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
 		set_current_list(json_object_get_string(val));
-	if (scale > 1) {
-		f = (double)json_object_get_int(val) / scale;
-		newval = json_object_new_double(f);
-	}
+	if (scale)
+		newval = json_object_new_double(json_object_get_int(val) * scale);
 	if (json_object_object_get_ex(pub, "normal", &normal))
 		json_object_object_add(normal, key, newval);
 	add_keyval(pubcfg, pub, key, newval, true);
@@ -1527,7 +1524,7 @@ static json_object *parse_obisfile(json_object *lists, const char *fname, char *
 
 static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 {
-	json_object *tmp, *obis, *list, *ret;
+	json_object *tmp, *obis, *list, *ret, *parsed;
 	const char *name;
 	int i           ;
 
@@ -1546,7 +1543,9 @@ static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 
 		for (i = 0; i < json_object_array_length(tmp); i++) {
 			name = json_object_get_string(json_object_array_get_idx(tmp, i));
-			json_object_object_add(obis, name, parse_obisfile(list, name, buf, bufsize));
+			parsed = parse_obisfile(list, name, buf, bufsize);
+			if (parsed)
+				json_object_object_add(obis, name, parsed);
 		}
 	}
 
