@@ -646,7 +646,7 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 {
 	unsigned long invokeid;
 	unsigned char *p;
-	time_t t;
+	time_t t = 0;
 	json_object *tmp, *body;
 	bool datetime_bug = false;
 
