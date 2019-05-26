@@ -1227,7 +1227,10 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 			continue;
 		pub = json_object_to_json_string_ext(val, JSON_C_TO_STRING_PLAIN);
 		publen = strlen(pub);
-		mosquitto_publish(mosq, &mid, t, publen, pub, 0, false);
+		if (mosquitto_publish(mosq, &mid, t, publen, pub, 0, false)) {
+			debug("mqtt broker went away -reconnecting\n");
+			mosquitto_reconnect(mosq);
+		}
 	}
 
 	return 0;
