@@ -6,10 +6,7 @@ Items which needs to be fixed in arbitrary order:
 
 ## OBIS list parsing
 
-* Simplify the parsing by changing the list format to match what the
-  application needs
-* Add a metadata level to the list files while at it, for stuff like
-  source, revision, author, comments etc
+* Include some metadata
 
 ## Memory management
 
@@ -26,7 +23,15 @@ Items which needs to be fixed in arbitrary order:
 
 * test and robustify, making sure the serial device can go away and
   reappear without breaking stuff
-  
+
+## Publishing
+
+* Create a packet metadata section _before_ parsing, including stuff like
+  1. timestamp
+  2. program name
+  3. program version
+
+
 ## Code refactoring
 
 * cleanup is obviously necessary
@@ -50,6 +55,11 @@ Items which needs to be fixed in arbitrary order:
 
 * provide some sane defaults?
 * add log configuration?
+* add a settings section. Some possibilities:
+   1. timestamp format
+   2. include units (implies values as strings)
+   
+
 
 
 ## ++++
