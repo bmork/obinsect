@@ -25,12 +25,14 @@
 #include <getopt.h>
 #include <fcntl.h>
 #include <json.h>
+#include <limits.h>
 #include <mosquitto.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <time.h>
@@ -45,6 +47,11 @@
 #define MQTT_PORT	1883
 #define MQTTS_PORT	8883
 #define MQTT_KEEPALIVE	60
+
+/* static metadata */
+static char *progname = NULL;
+static char hostname[64];
+static char *serialport = NULL;
 
 /* parsed configuration */
 static json_object *cfg = NULL;
@@ -158,11 +165,11 @@ static int serial_open(const char *dev)
 }
 
 
-/* 
+/*
  * See /usr/local/src/git/AmsToMqttBridge/Samples/Kaifa/readme.md for docs!
  *
  * http://www.fit.vutbr.cz/units/UIFS/pubs/tr.php?file=%2Fpub%2F11616%2FTR-DLMS.pdf&id=11616
- * (TR-DLMS.pdf) has a Table 3 contains data types usable for attributes of COSEM objects 
+ * (TR-DLMS.pdf) has a Table 3 contains data types usable for attributes of COSEM objects
  *
  * Better reference:
  *  https://www.dlms.com/files/Blue-Book-Ed-122-Excerpt.pdf,
@@ -191,7 +198,7 @@ Ref aidon sample:
 0109 // array of 9 elements
  0202 // struct of 2 elements
   0906 0101000281ff // octet-string of 6 bytes (OBIS code)
-  0a0b 4149444f4e5f5630303031 // visible-string of 11 bytes (AIDON_V0001) 
+  0a0b 4149444f4e5f5630303031 // visible-string of 11 bytes (AIDON_V0001)
  0202 // struct of 2 elements
   0906 0000600100ff // octet-string of 6 bytes (OBIS code)
   0a10 37333539393932383930393431373432  // visible-string of 16 bytes (7359992890941742)
@@ -337,10 +344,14 @@ static unsigned char *hdlc_start(unsigned char *buf, size_t buflen)
      creates a new top level json object to hold the parsed frame, adding a hdlc
      struct with format, segmentation, length, src, dst, control, hcs and fcs fields
 */
-static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object **json)
+static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object *json)
 {
 	int dstlen, format, segmentation, length, src, dst, control, hcs, fcs, check;
 	json_object *tmp;
+
+	/* already failed length check */
+	if (buflen < 2)
+		return NULL;
 
 	/* check start and stop markers */
 	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL) {
@@ -412,8 +423,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	json_object_object_add(tmp, "hcs", json_object_new_int(hcs));
 	json_object_object_add(tmp, "fcs", json_object_new_int(fcs));
 
-	*json = json_object_new_object();
-	json_object_object_add(*json, "hdlc", tmp);
+	json_object_object_add(json, "hdlc", tmp);
 
 	/* return offset to payload */
 	return &buf[8 + dstlen];
@@ -649,6 +659,10 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 	time_t t = 0;
 	json_object *tmp, *body;
 	bool datetime_bug = false;
+
+	/* header parsing failed? */
+	if (!buf)
+		return false;
 
 	/* add LLC field */
 	json_object_object_add(json, "llc", parse_llc(buf, buflen));
@@ -1205,17 +1219,13 @@ static json_object *get_value(json_object *val, json_object *values)
 	return NULL;
 }
 
-// FIMXE: topic, qos and variable mapping should be configurable - json config file?
+/* FIMXE: qos should be configurable? */
 static int publish(struct mosquitto *mosq, json_object *pubdata)
 {
 	static int mid = 1;
 	const char *pub;
 	size_t publen;
 	json_object *topics, *val;
-
-
-	// * requires libjson-c version 0.13+
-	// pub = json_object_to_json_string_length(normal, JSON_C_TO_STRING_PLAIN, &publen);
 
 	/* nothing published unless configured */
 	if (!cfg || !json_object_object_get_ex(cfg, "topicmap", &topics))
@@ -1225,9 +1235,11 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 		val = get_value(tmp, pubdata);
 		if (!val)
 			continue;
+
+		// pub = json_object_to_json_string_length(normal, JSON_C_TO_STRING_PLAIN, &publen); /* requires libjson-c version 0.13+ */
 		pub = json_object_to_json_string_ext(val, JSON_C_TO_STRING_PLAIN);
 		publen = strlen(pub);
-		if (mosquitto_publish(mosq, &mid, t, publen, pub, 0, false)) {
+		if (mosquitto_publish(mosq, &mid, t, publen, pub, 0, false)) { /* QoS = 0 */
 			debug("mqtt broker went away -reconnecting\n");
 			mosquitto_reconnect(mosq);
 		}
@@ -1260,12 +1272,54 @@ static void add_hexdump(json_object *pubcfg, json_object *pubdata, const char *t
 	add_keyval(pubcfg, pubdata, type, json_object_new_string_len(printbuffer, pos), true);
 }
 
+static json_object *save_metadata(size_t framelen, struct timeval *tv)
+{
+	static int framecount = 0;
+	json_object *tmp, *ret;
+
+	/* save time before any potetionally time consuming calls to libjson-c */
+	gettimeofday(tv, NULL);
+
+	tmp = json_object_new_object();
+	json_object_object_add(tmp, "timestamp", json_object_new_int(tv->tv_sec));
+	json_object_object_add(tmp, "framelength", json_object_new_int(framelen));
+	json_object_object_add(tmp, "framenumber", json_object_new_int(++framecount));
+	json_object_object_add(tmp, "srcprog", json_object_new_string(progname));
+	json_object_object_add(tmp, "srchost", json_object_new_string(hostname));
+	json_object_object_add(tmp, "version", json_object_new_string(VERSION));
+	json_object_object_add(tmp, "serialport", json_object_new_string(serialport));
+	ret = json_object_new_object();
+	json_object_object_add(ret, "metadata", tmp);
+	return ret;
+}
+
+static void add_metadata(json_object *pubcfg, json_object *pubdata, json_object *json, struct timeval *start)
+{
+	struct timeval stop;
+	json_object *meta;
+
+	if (!json || !json_object_object_get_ex(json, "metadata", &meta))
+		return;
+
+	/* calculate parsing time */
+	if (!gettimeofday(&stop, NULL))
+		json_object_object_add(meta, "parsetime", json_object_new_int(stop.tv_sec == start->tv_sec ? stop.tv_usec - start->tv_usec : UINT_MAX));
+
+	/* add separate metadata items */
+	json_object_object_foreach(meta, mkey, mval)
+		add_keyval(pubcfg, pubdata, mkey, mval, false);
+
+	/* add complete metadata blob */
+	add_keyval(pubcfg, pubdata, "metadata", meta, false);
+}
+
 static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, size_t rbuflen)
 {
 	unsigned char *payload, *cur, *hdlc;
 	struct pollfd fds[1];
 	int ret, rlen, framelen = -1;
 	json_object *json, *pubcfg, *pubdata;
+	struct timeval tv;
 
 	/* get the publish config */
 	if (!json_object_object_get_ex(cfg, "publish", &pubcfg))
@@ -1302,10 +1356,6 @@ nextframe:
 			/* verify frame type and get the expectedlength */
 			framelen = hdlc_length(hdlc);
 
-			/* skip frame if invalid */
-			if (framelen < 0)
-				goto skipframe;
-
 			/* realign if exceeding buf size */
 			if (hdlc + framelen + 2 > rbuf + rbuflen) {
 				if (framelen + 2 > rbuflen) {
@@ -1325,44 +1375,29 @@ nextframe:
 		if (framelen > 0 && (cur - hdlc) < (framelen + 2))
 			continue;
 
-		/* parse and verify the outher HDLC frame */
-		payload = hdlc_verify(hdlc, framelen + 2, &json);
-		if (!payload) {
-skipframe:
-			/* possibly publish dropped frame */
-			pubdata = normalize(pubcfg, NULL);
-			add_hexdump(pubcfg, pubdata, "dropped", hdlc, framelen > 0 ? framelen + 2 : 64);
-			publish(mosq, pubdata);
-			json_object_put(pubdata);
+		/* Yay! We got a complete frame - let's save some metadata now */
+		json = save_metadata(framelen, &tv);
 
-			/* we only skip the initial CONTROL char in case the real frame starts somewhere inside the bogus one */
-			memmove(rbuf, hdlc + 1, cur - hdlc - 1);
-			cur -= hdlc - rbuf + 1;
-			framelen = -1;
-			goto nextframe;
-		}
+                /* strip off HDLC framing, verify checksums and save to our parse object */
+		payload = hdlc_verify(hdlc, framelen + 2, json);
+		parse_payload(payload, framelen - (payload - hdlc + 1), json);
+		pubdata = normalize(pubcfg, json);
 
-		/* got a complete and verified frame - parse the payload */
-		if (parse_payload(payload, framelen - (payload - hdlc + 1), json)) {
-			pubdata = normalize(pubcfg, json);
-			add_hexdump(pubcfg, pubdata, "rawhexdump", hdlc, framelen + 2);
-			add_keyval(pubcfg, pubdata, "full", json, true);
+		/* internally generated data */
+		add_hexdump(pubcfg, pubdata, "rawhexdump", hdlc, framelen > 0 ? framelen + 2 : 64);
+		add_metadata(pubcfg, pubdata, json, &tv);
+		add_keyval(pubcfg, pubdata, "full", json, true);
+		debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+		debug("*** pubdata:\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
+		publish(mosq, pubdata);
 
-			/* add some local metadata */
-			add_keyval(pubcfg, pubdata, "timestamp", json_object_new_int(time(NULL)), false);
-//	add_keyval(pubcfg, ret, "current-list", , false);
-//	add_keyval(pubcfg, ret, "runtime", , false);
-//	add_keyval(pubcfg, ret, "packets", , false);
-
-			debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
-			debug("*** pubdatal:\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
-
-			publish(mosq, pubdata);
-		}
-
-		/* and drop it */
+		/* drop all per-frame objects */
 		json_object_put(json);
 		json_object_put(pubdata);
+
+		/* skip frame marker only in case of hdlc parse failure */
+		if (!payload)
+			framelen = 0;
 
 		/* keep remaining data for next frame, including the stop marker in case it doubles as start of next frame */
 		memmove(rbuf, hdlc + framelen + 1, cur - rbuf - framelen + 1);
@@ -1371,7 +1406,7 @@ skipframe:
 		goto nextframe;
 	}
 	return 0;
-	}
+}
 
 
 /* parse configuration and build some helper structures
@@ -1539,13 +1574,13 @@ static struct option main_options[] = {
 	{ 0, 0, 0, 0 }
 };
 
-static void usage(const char *prog)
+static void usage()
 {
 	int maj, min, rev;
 
 	mosquitto_lib_version(&maj, &min, &rev);
-	printf("%s version %s, using libmosquitto %u.%u.%u and libjson-c %s\n\n", prog, VERSION, maj, min, rev, json_c_version());
-	printf("Usage: %s [-d] [-c configfile] -s device\n", prog);
+	printf("%s version %s, using libmosquitto %u.%u.%u and libjson-c %s\n\n", progname, VERSION, maj, min, rev, json_c_version());
+	printf("Usage: %s [-d] [-c configfile] -s device\n", progname);
 	printf("                     [-b hostname] [-p port] [-u username [-P password]]\n");
 #ifdef WITH_TLS
 	printf("                     [-i id] [-k keepalive] [--insecure]\n");
@@ -1575,7 +1610,7 @@ static void usage(const char *prog)
 	printf(" --key      : Client private key\n");
 #endif
 
-	printf("\nExample: %s -s /dev/ttyUSB0 -b broker.example.com\n", prog);
+	printf("\nExample: %s -s /dev/ttyUSB0 -b broker.example.com\n", progname);
 
 }
 
@@ -1604,11 +1639,15 @@ int main(int argc, char *argv[])
 	bool insecure = false;
 #endif
 
+	/* initialize global vars */
+	progname = argv[0];
+	gethostname(hostname, sizeof(hostname));
+
 	while ((opt = getopt_long(argc, argv, "?hdb:c:i:k:p:P:s:u", main_options, NULL)) != -1) {
 		switch(opt) {
 		case '?':
 		case 'h':
-			usage(argv[0]);
+			usage();
 			return 0;
 		case 'd':
 			debug = true;
@@ -1632,7 +1671,13 @@ int main(int argc, char *argv[])
 			mqttpw = optarg;
 			break;
 		case 's':
-			serfd = !optarg[1] && optarg[0] == '-' ? STDIN_FILENO : serial_open(optarg);
+			if (!optarg[1] && optarg[0] == '-') {
+				serialport = "stdin";
+				serfd = STDIN_FILENO;
+			} else {
+				serialport = optarg;
+				serfd = serial_open(optarg);
+			}
 			break;
 		case 'u':
 			mqttuser = optarg;
@@ -1663,7 +1708,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* print banner */
-	fprintf(stderr, "%s version %s\n", argv[0], VERSION);
+			fprintf(stderr, "%s version %s running on %s\n", progname, VERSION, hostname);
 
         /* initialize mqtt client and read buffer */
 	mosquitto_lib_init();
