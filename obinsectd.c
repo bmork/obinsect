@@ -59,6 +59,10 @@ static json_object *cfg = NULL;
 /* current OBIS list */
 static json_object *current_list = NULL;
 
+/* a few global settings - OK, this is a mess :-) */
+static bool unscaled = false;
+static bool units = false;
+
 /* defines size of both the read buffer and the print buffer.- because I'm lazy... */
 #define BUFSIZE (1024 * 2)
 
@@ -978,11 +982,24 @@ static json_object *obis_get_val(const char *key, json_object *val)
 	return json_object_get(val);
 }
 
+static const char *get_unit(const char *key)
+{
+	json_object *unit, *ret;
+
+	if (!units || !current_list)
+		return NULL;
+	if (!json_object_object_get_ex(current_list, "unit", &unit))
+		return NULL;
+	if (json_object_object_get_ex(unit, key, &ret))
+		return json_object_get_string(ret);
+	return NULL;
+}
+
 static double get_scale(const char *key)
 {
 	json_object *scale, *ret;
 
-	if (!current_list)
+	if (unscaled || !current_list)
 		return 0;
 	if (!json_object_object_get_ex(current_list, "scale", &scale))
 		return 0;
@@ -1043,16 +1060,33 @@ static void set_current_list(const char *listname)
 		current_list = ret;
 }
 
+static json_object *get_val_with_unit(const char *key, json_object *val)
+{
+	const char *unit = get_unit(key);
+	double scale = get_scale(key);
+
+	if (!scale && !unit)
+		return val;
+
+	if (!printbuffer || !unit)
+		return json_object_new_double(json_object_get_int(val) * scale);
+
+	if (!scale)
+		sprintf(printbuffer, "%d %s", json_object_get_int(val), unit);
+	else
+		sprintf(printbuffer, "%0.3f %s", json_object_get_int(val) * scale, unit);
+
+	return json_object_new_string(printbuffer);
+}
+
 static void add_obis(json_object *pubcfg, json_object *pub, const char *key, json_object *val)
 {
 	const char *alias = get_alias(key);
 	json_object *normal, *newval = val;
-	double scale = get_scale(key);
 
 	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
 		set_current_list(json_object_get_string(val));
-	if (scale)
-		newval = json_object_new_double(json_object_get_int(val) * scale);
+	newval = get_val_with_unit(key, val);
 	if (json_object_object_get_ex(pub, "normal", &normal))
 		json_object_object_add(normal, key, newval);
 	add_keyval(pubcfg, pub, key, newval, true);
@@ -1480,6 +1514,11 @@ static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 		} else {
 			name = json_object_get_string(tmp);
 			set_publish(publish, name, NULL);
+
+			/* include "timestamp" in the special "normal" object */
+			if (!strcmp(name, "normal"))
+				set_publish(publish, "timestamp", tmp);
+
 		}
 	}
 }
@@ -1571,6 +1610,8 @@ static struct option main_options[] = {
 	{ "insecure",   0, 0, 5 },
 #endif
 #endif
+	{ "unscaled",   0, 0, 6 },
+	{ "units",      0, 0, 7 },
 	{ 0, 0, 0, 0 }
 };
 
@@ -1588,6 +1629,7 @@ static void usage()
 #else
 	printf("                     [-i id] [-k keepalive]\n");
 #endif
+	printf("                     [--unscaled | --units ]\n");
 
 	printf(" -c : Configuration file.  Default: %s\n", CONFIG_FILE);
 	printf(" -d : Enable debugging\n");
@@ -1609,6 +1651,10 @@ static void usage()
 	printf(" --cert     : Client certificate\n");
 	printf(" --key      : Client private key\n");
 #endif
+
+	printf("\nPublished value format:\n");
+	printf(" --unscaled : Do not scale numbers. Default: false (scaling enabled)\n");
+	printf(" --units    : Include units. Implies value scaling. Default: false\n");
 
 	printf("\nExample: %s -s /dev/ttyUSB0 -b broker.example.com\n", progname);
 
@@ -1698,9 +1744,18 @@ int main(int argc, char *argv[])
 		case 5:
 			insecure = true;
 			break;
+		case 6:
+			unscaled = true;
+			break;
+		case 7:
+			units = true;
+			break;
 #endif
 		}
 	}
+
+	if (units)
+		unscaled = false;
 
 	if (serfd < 0) {
 		usage(argv[0]);
