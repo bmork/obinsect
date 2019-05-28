@@ -59,6 +59,10 @@ static json_object *cfg = NULL;
 /* current OBIS list */
 static json_object *current_list = NULL;
 
+/* OBIS code lookup table - ListId must be first entry, and is fixed */
+#define MAX_LIST_LENGTH 32
+static const char *obiscode[MAX_LIST_LENGTH] = { "1-1:0.2.129.255" , NULL };
+
 /* a few global settings - OK, this is a mess :-) */
 static bool unscaled = false;
 static bool units = false;
@@ -942,28 +946,14 @@ f) Kamstrup list 2:
 
  */
 
-static const char *obis_lookup(const char *list, int idx)
+static const char *obis_lookup(int idx)
 {
-	switch (idx) {
-	case 1: return "1-1:0.2.129.255";
-	case 2: return "0-0:96.1.0.255";
-	case 3: return "0-0:96.1.7.255";
-	case 4: return "1-0:1.7.0.255";
-	case 5: return "1-0:2.7.0.255";
-	case 6: return "1-0:3.7.0.255";
-	case 7: return "1-0:4.7.0.255";
-	case 8: return "1-0:31.7.0.255";
-	case 9: return "1-0:51.7.0.255";
-	case 10: return "1-0:71.7.0.255";
-	case 11: return "1-0:32.7.0.255";
-	case 12: return "1-0:52.7.0.255";
-	case 13: return "1-0:72.7.0.255";
-	case 14: return "0-0:1.0.0.255";
-	case 15: return "1-0:1.8.0.255";
-	case 16: return "1-0:2.8.0.255";
-	case 17: return "1-0:3.8.0.255";
-	case 18: return "1-0:4.8.0.255";
-	}
+	const char *ret = NULL;
+
+	if (idx > 0 && idx < MAX_LIST_LENGTH)
+		ret = obiscode[idx - 1];
+	if (ret)
+		return ret;
 	return "unknown";
 }
 
@@ -1047,17 +1037,45 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 			json_object_object_add(pub, arrayname, obj);
 		}
 		json_object_object_add(obj, key, val);
+
 	}
 }
 
 static void set_current_list(const char *listname)
 {
-	json_object *lists, *ret;
+	json_object *tmp, *list;
+	int i = 0;
 
-	if (!json_object_object_get_ex(cfg, "obislists", &lists))
+
+	/* list config is required.... */
+	if (!json_object_object_get_ex(cfg, "obislists", &tmp))
 		return;
-	if (json_object_object_get_ex(lists, listname, &ret))
-		current_list = ret;
+
+	/* no need to bother with updates if not found or not changed */
+	if (!json_object_object_get_ex(tmp, listname, &list) || list == current_list)
+		return;
+
+	/* the "alias" table is required */
+	if (!json_object_object_get_ex(list, "alias", &tmp))
+		return;
+
+	/* update OBIS lookup table, but leave ListId static */
+	json_object_object_foreach(tmp, key, val) {
+		debug("adding lookup for '%s' (%s)\n", key, json_object_get_string(val));
+		if (!i++)
+			continue;
+		if (i >= MAX_LIST_LENGTH)
+			break;
+		obiscode[i] = key;
+	}
+
+	/* clear remaining entries */
+	for (; i < MAX_LIST_LENGTH; i++)
+		obiscode[i] = NULL;
+
+	/* save list pointer */
+	current_list = list;
+	debug("Current OBIS list set to '%s\n", listname);
 }
 
 static json_object *format_value(const char *key, json_object *val)
@@ -1127,8 +1145,6 @@ static void add_obis(json_object *pubcfg, json_object *pub, const char *key, jso
 	const char *alias = get_alias(key);
 	json_object *tmp, *newval = val;
 
-	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
-		set_current_list(json_object_get_string(val));
 	newval = format_value(key, val);
 	if (json_object_object_get_ex(pub, "normal", &tmp))
 		json_object_object_add(tmp, key, newval);
@@ -1252,35 +1268,39 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 				else if (!myval && !json_object_is_type(val, json_type_object))
 					myval = val;
 			}
-			if (mykey && myval)
+			if (mykey && myval) {
+				/* set current list id? */
+				if (!i && !strcmp(mykey, "1-1:0.2.129.255"))
+					set_current_list(json_object_get_string(myval));
 				add_obis(pubcfg, ret, mykey, obis_get_val(mykey, myval));
+			}
 		}
 	} else {
 		const char *mykey = NULL;
-		const char *listname = NULL;
 		size_t n = json_object_object_length(body);
 		int i = 0;
 
 		json_object_object_foreach(body, key, val) {
 			i++;
+			/* single value lists are always: Active power+ (Q1+Q4) in kW */
 			if (n == 1)
-				/* the simplest Aidon and Kaifa list
-				 * has only a single value:
-				 *  - Active power+ (Q1+Q4) in kW
-				 */
 				add_obis(pubcfg, ret, "1-0:1.7.0.255", json_object_get(val));
-			else if (!listname) {
-				/* the list name is always the first value of any multi-element list */
-				listname = json_object_get_string(val);
-				add_obis(pubcfg, ret, obis_lookup(listname, 1), json_object_get(val));
-			}
 			else if (!strncmp(key, "obis", 4))
 				mykey = json_object_get_string(val);
 			else {
-				/* "mykey" is the obis code for Kamstrup lists. Look up by index for Kaifa lists */
+				/* set current list id? */
+				if (i == 1)
+					set_current_list(json_object_get_string(val));
+
+				/*
+				 * "mykey" is the obis code from the previous element for Kamstrup lists.
+				 * Looking up code by index for Kaifa lists, and the first element (ListId)
+				 * of Kamstrup lists
+				 */
 				if (!mykey)
-					mykey = obis_lookup(listname, i);
+					mykey = obis_lookup(i);
 				add_obis(pubcfg, ret,  mykey, obis_get_val(mykey, val));
+				mykey = NULL;
 			}
 		}
 	}
@@ -1605,25 +1625,29 @@ static json_object *parse_obisfile(json_object *lists, const char *fname, char *
 		if (!strcmp("_metadata", key))
 			continue;
 		json_object_object_add(lists, key, val);
+
+		/* simply use the first list for lookup until we have something better */
+		if (!current_list)
+			set_current_list(key);
 	}
 
 	return tmp;
 }
 
-static json_object *read_config(const char *fname, char *buf, size_t bufsize)
+static void read_config(const char *fname, char *buf, size_t bufsize)
 {
-	json_object *tmp, *list, *ret;
+	json_object *tmp, *list;
 	const char *name;
 	int i           ;
 
-	ret = read_json_file(fname, buf, bufsize);
-	if (!ret)
-		return NULL;
+	cfg = read_json_file(fname, buf, bufsize);
+	if (!cfg)
+		return;
 
 	/* read all the OBIS definitions so we can look up aliases */
-	if (json_object_object_get_ex(ret, "obisdefs", &tmp) && json_object_is_type(tmp, json_type_array)) {
+	if (json_object_object_get_ex(cfg, "obisdefs", &tmp) && json_object_is_type(tmp, json_type_array)) {
 		list = json_object_new_object();
-		json_object_object_add(ret, "obislists", list);
+		json_object_object_add(cfg, "obislists", list);
 
 		for (i = 0; i < json_object_array_length(tmp); i++) {
 			name = json_object_get_string(json_object_array_get_idx(tmp, i));
@@ -1633,9 +1657,7 @@ static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 	}
 
 	/* post process config - adding helper structures */
-	process_cfg(ret, buf, bufsize);
-
-	return ret;
+	process_cfg(cfg, buf, bufsize);
 }
 
 static struct option main_options[] = {
@@ -1831,7 +1853,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* read config file */
-	cfg = read_config(cfgfile, (char *)buf, BUFSIZE);
+	read_config(cfgfile, (char *)buf, BUFSIZE);
 	if (!cfg)
 		fprintf(stderr, "Failed to parse '%s' - will not publish anything to '%s'\n", cfgfile, broker);
 	debug("%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
