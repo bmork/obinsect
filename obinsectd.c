@@ -73,35 +73,15 @@ static bool units = false;
 /* shared print buffer */
 static char *printbuffer = NULL;
 
-#ifdef DEBUG
-static bool debug = true;
 
-#define debug(arg...) fprintf(stderr, arg)
+static bool debug = false;
 
-static void print_packet(const char *pfx, void *buf, int len)
-{
-	int i;
-	unsigned char *p = buf;
-
-	fprintf(stderr, "*** %s ***\n", pfx);
-	for (i=0; i<len; i++)
-		fprintf(stderr, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
-	fprintf(stderr, "\n");
-}
+#define debug(arg...) do { if (debug) fprintf(stderr, arg); } while (0)
 
 static void libmosquitto_log_callback(struct mosquitto *mosq, void *userdata, int level, const char *str)
 {
 	debug("<%i> %s\n", level, str);
 }
-
-#else
-static bool debug = false;
-
-#define debug(arg...)
-
-#define print_packet(pfx, buf, len)
-
-#endif /* DEBUG */
 
 /*
  * crc16 and HDLC escape code borrowed from modemmanager/libqcdm
@@ -1177,11 +1157,11 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 
 	/* create a "normal" result list with all OBIS codes as keys? */
 	if (json_object_object_get_ex(pubcfg, "normal", NULL))
-		json_object_object_add(ret, "normal", json_object_new_object());
+		add_keyval(pubcfg, ret, "normal", json_object_new_object(), true);
 
 	/* create an "alias" result list with all OBIS aliases as keys? */
 	if (json_object_object_get_ex(pubcfg, "alias", NULL))
-		json_object_object_add(ret, "alias", json_object_new_object());
+		add_keyval(pubcfg, ret, "alias", json_object_new_object(), true);
 
 	/* overall formatting differs between the 3:
 
@@ -1353,17 +1333,17 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 static void add_hexdump(json_object *pubcfg, json_object *pubdata, const char *type, unsigned char *p, size_t plen)
 {
 	int i, pos = 0;
+	bool do_pub = printbuffer && json_object_object_get_ex(pubcfg, type, NULL);
 
-	print_packet(type, p, plen);
-	if (!printbuffer)
-		return;
-
-	/* shortcut to avoid unnecessary formatting */
-	if (!json_object_object_get_ex(pubcfg, type, NULL))
-		return;
+	/* debug header on stderr */
+	if (debug)
+		fprintf(stderr, "*** %s ***\n", type);
 
 	for (i=0; i<plen; i++) {
-		pos += snprintf(printbuffer + pos, BUFSIZE - pos, "%02hhx%s", p[i], (i + 1) % 16 ? " " : "  ");
+		if (debug)
+			fprintf(stderr, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
+		if (do_pub)
+			pos += snprintf(printbuffer + pos, BUFSIZE - pos, "%02hhx%s", p[i], (i + 1) % 16 ? " " : "  ");
 
 		/* readjust length for the json object below in case of overflow */
 		if (pos >= BUFSIZE) {
@@ -1371,7 +1351,10 @@ static void add_hexdump(json_object *pubcfg, json_object *pubdata, const char *t
 			break;
 		}
 	}
-	add_keyval(pubcfg, pubdata, type, json_object_new_string_len(printbuffer, pos), true);
+	if (debug)
+		fprintf(stderr, "\n");
+	if (do_pub)
+		add_keyval(pubcfg, pubdata, type, json_object_new_string_len(printbuffer, pos), true);
 }
 
 static json_object *save_metadata(size_t framelen, struct timeval *tv)
@@ -1486,11 +1469,11 @@ nextframe:
 		pubdata = normalize(pubcfg, json);
 
 		/* internally generated data */
-		add_hexdump(pubcfg, pubdata, "rawhexdump", hdlc, framelen > 0 ? framelen + 2 : 64);
+		add_hexdump(pubcfg, pubdata, "rawpacket", hdlc, framelen > 0 ? framelen + 2 : 64);
 		add_metadata(pubcfg, pubdata, json, &tv);
-		add_keyval(pubcfg, pubdata, "full", json, true);
-		debug("*** json:\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
-		debug("*** pubdata:\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
+		add_keyval(pubcfg, pubdata, "parserdata", json, true);
+		debug("*** parser data ***\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+		debug("*** publish data ***\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
 		publish(mosq, pubdata);
 
 		/* drop all per-frame objects */
@@ -1702,7 +1685,7 @@ static void usage()
 #else
 	printf("                     [-i id] [-k keepalive]\n");
 #endif
-	printf("                     [--unscaled | --units ]\n");
+	printf("                     [--unscaled | --units ]\n\n");
 
 	printf(" -c : Configuration file.  Default: %s\n", CONFIG_FILE);
 	printf(" -d : Enable debugging\n");
@@ -1841,9 +1824,7 @@ int main(int argc, char *argv[])
         /* initialize mqtt client and read buffer */
 	mosquitto_lib_init();
 	mosq = mosquitto_new(mqttid, clean_session, NULL);
-#ifdef DEBUG
 	mosquitto_log_callback_set(mosq, libmosquitto_log_callback);
-#endif
 	buf = malloc(BUFSIZE);
 	printbuffer = malloc(BUFSIZE);
 	if (!buf || !printbuffer || !mosq) {
@@ -1855,8 +1836,9 @@ int main(int argc, char *argv[])
 	/* read config file */
 	read_config(cfgfile, (char *)buf, BUFSIZE);
 	if (!cfg)
-		fprintf(stderr, "Failed to parse '%s' - will not publish anything to '%s'\n", cfgfile, broker);
-	debug("%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
+		fprintf(stderr, "Failed to parse '%s' - will not publish anything to MQTT broker '%s'\n", cfgfile, broker);
+	else
+		debug("*** configuration ***\n%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
 
 	/* configure broker connection */
 	if (mqttuser)
