@@ -995,16 +995,16 @@ static const char *get_unit(const char *key)
 	return NULL;
 }
 
-static double get_scale(const char *key)
+static int get_scaler(const char *key)
 {
 	json_object *scale, *ret;
 
 	if (unscaled || !current_list)
 		return 0;
-	if (!json_object_object_get_ex(current_list, "scale", &scale))
+	if (!json_object_object_get_ex(current_list, "scaler", &scale))
 		return 0;
 	if (json_object_object_get_ex(scale, key, &ret))
-		return json_object_get_double(ret);
+		return json_object_get_int(ret);
 	return 0;
 }
 
@@ -1060,40 +1060,85 @@ static void set_current_list(const char *listname)
 		current_list = ret;
 }
 
-static json_object *get_val_with_unit(const char *key, json_object *val)
+static json_object *format_value(const char *key, json_object *val)
 {
 	const char *unit = get_unit(key);
-	double scale = get_scale(key);
+	const int scaler = get_scaler(key);
+	double factor;
+	char *format;
+	int ival, ifactor = 0;
 
-	if (!scale && !unit)
+	/* no formatting necessary */
+	if (!scaler && !unit)
 		return val;
 
-	if (!printbuffer || !unit)
-		return json_object_new_double(json_object_get_int(val) * scale);
+	/* failsafe... */
+	if (!json_object_is_type(val, json_type_int))
+		return val;
 
-	if (!scale)
-		sprintf(printbuffer, "%d %s", json_object_get_int(val), unit);
-	else
-		sprintf(printbuffer, "%0.3f %s", json_object_get_int(val) * scale, unit);
+	/* lookup instead of calulate - simpler and faster as long as we only support -3..3 */
+	switch (scaler) {
+	case -3:
+		factor = 0.001;
+		format = "%0.3f %s";
+		break;
+	case -2:
+		factor = 0.01;
+		format = "%0.2f %s";
+		break;
+	case -1:
+		factor = 0.1;
+		format = "%0.1f %s";
+		break;
+	case 0:
+		if (!unit)
+			return val;
+		ifactor = 1;
+		break;
+	case 1:
+		ifactor = 10;
+		break;
+	case 2:
+		ifactor = 100;
+		break;
+	case 3:
+		ifactor = 1000;
+		break;
+	default:
+		debug("unsupported scaler for %s: %d\n", key, scaler);
+		return val;
+	}
 
+	ival = json_object_get_int(val);
+	if (ifactor) {
+		if (!unit)
+			return json_object_new_int(ival * ifactor);
+		sprintf(printbuffer, "%d %s", ival * ifactor, unit);
+	} else {
+		if (!unit)
+			return json_object_new_double(ival * factor);
+		sprintf(printbuffer, format, ival * factor, unit);
+	}
 	return json_object_new_string(printbuffer);
 }
 
 static void add_obis(json_object *pubcfg, json_object *pub, const char *key, json_object *val)
 {
 	const char *alias = get_alias(key);
-	json_object *normal, *newval = val;
+	json_object *tmp, *newval = val;
 
 	if (!current_list && !strcmp(key, "1-1:0.2.129.255"))
 		set_current_list(json_object_get_string(val));
-	newval = get_val_with_unit(key, val);
-	if (json_object_object_get_ex(pub, "normal", &normal))
-		json_object_object_add(normal, key, newval);
+	newval = format_value(key, val);
+	if (json_object_object_get_ex(pub, "normal", &tmp))
+		json_object_object_add(tmp, key, newval);
 	add_keyval(pubcfg, pub, key, newval, true);
-	if (alias)
+	if (alias) {
+		if (json_object_object_get_ex(pub, "alias", &tmp))
+			json_object_object_add(tmp, alias, newval);
 		add_keyval(pubcfg, pub, alias, newval, true);
+	}
 }
-
 
 /*
  * post process the parsed packet, converting the data to simple key => value pairs
@@ -1118,6 +1163,9 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 	if (json_object_object_get_ex(pubcfg, "normal", NULL))
 		json_object_object_add(ret, "normal", json_object_new_object());
 
+	/* create an "alias" result list with all OBIS aliases as keys? */
+	if (json_object_object_get_ex(pubcfg, "alias", NULL))
+		json_object_object_add(ret, "alias", json_object_new_object());
 
 	/* overall formatting differs between the 3:
 
@@ -1515,8 +1563,10 @@ static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 			name = json_object_get_string(tmp);
 			set_publish(publish, name, NULL);
 
-			/* include "timestamp" in the special "normal" object */
+			/* include "timestamp" in the special "normal" and "alias" objects */
 			if (!strcmp(name, "normal"))
+				set_publish(publish, "timestamp", tmp);
+			if (!strcmp(name, "alias"))
 				set_publish(publish, "timestamp", tmp);
 
 		}
@@ -1577,7 +1627,8 @@ static json_object *read_config(const char *fname, char *buf, size_t bufsize)
 
 		for (i = 0; i < json_object_array_length(tmp); i++) {
 			name = json_object_get_string(json_object_array_get_idx(tmp, i));
-			parse_obisfile(list, name, buf, bufsize);
+			if (!parse_obisfile(list, name, buf, bufsize))
+				debug("failed to parse '%s'\n", name);
 		}
 	}
 
