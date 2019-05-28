@@ -76,11 +76,22 @@ static char *printbuffer = NULL;
 
 static bool debug = false;
 
-#define debug(arg...) do { if (debug) fprintf(stderr, arg); } while (0)
+#define debug(format, arg...) do { if (debug) fprintf(stderr, "DEBUG: " format, arg); } while (0)
+#define err(format, arg...) do { fprintf(stderr, "ERROR: " format, arg); } while (0)
+#define info(format, arg...) do { fprintf(stderr, "INFO: " format, arg); } while (0)
 
 static void libmosquitto_log_callback(struct mosquitto *mosq, void *userdata, int level, const char *str)
 {
-	debug("<%i> %s\n", level, str);
+	switch (level) {
+	case MOSQ_LOG_ERR:
+		err("mqtt: %s\n", str);
+		break;
+	case MOSQ_LOG_DEBUG:
+		debug("mqtt: %s\n", str);
+		break;
+	default:
+		info("mqtt: %s\n", str);
+	}
 }
 
 /*
@@ -343,26 +354,26 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 
 	/* check start and stop markers */
 	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL) {
-		fprintf(stderr, "HDLC frame is missing start or stop markers\n");
+		err("HDLC frame is missing start (%c) or stop (%c) markers\n", buf[0], buf[buflen -1]);
 		return NULL;
 	}
 
 	/* verify header */
 	format = buf[1] >> 4;
 	if (format != 0xa) {
-		fprintf(stderr, "DLMS/COSEM requires HDLC frame format \"type 3\" - %#04x is invalid\n", format);
+		err("DLMS/COSEM requires HDLC frame format \"type 3\" - %#04x is invalid\n", format);
 		return NULL;
 	}
 
 	segmentation = !!(buf[1] & 0x08);
 	if (segmentation) {
-		fprintf(stderr, "HDLC segmentation is unsupported\n");
+		err("HDLC segmentation is unsupported (%02x%02x)\n", buf[1], buf[2]);
 		return NULL;
 	}
 
 	length = hdlc_length(buf);
 	if (length != buflen - 2) {
-		fprintf(stderr, "Invalid HDLC frame length: %d != %zd\n", length, buflen - 2);
+		err("Invalid HDLC frame length: %d != %zd\n", length, buflen - 2);
 		return NULL;
 	}
 
@@ -379,7 +390,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	}
 
 	if (dstlen == 3) {
-		fprintf(stderr, "Bogus HDLC destination address - 3 bytes?: %02x %02x %02x\n", buf[4], buf[5], buf[6]);
+		err("Bogus HDLC destination address - 3 bytes?: %02x %02x %02x\n", buf[4], buf[5], buf[6]);
 		return NULL;
 	}
 
@@ -388,7 +399,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	hcs = buf[7 + dstlen] << 8 | buf[6 + dstlen];
 	check = crc16((char *)(buf + 1), 5 + dstlen);
 	if (hcs != check) {
-		fprintf(stderr, "HDLC header checksum: %#06x != %#06x\n", hcs, check);
+		err("HDLC header checksum: %#06x != %#06x\n", hcs, check);
 		return NULL;
 	}
 
@@ -396,7 +407,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 	fcs = buf[buflen-2] << 8 | buf[buflen-3];
 	check = crc16((char *)(buf + 1), buflen - 4);
 	if (fcs != check) {
-		fprintf(stderr, "HDLC frame checksum: %#06x != %#06x\n", fcs, check);
+		err("HDLC frame checksum: %#06x != %#06x\n", fcs, check);
 		return NULL;
 	}
 
@@ -600,10 +611,10 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 		*ret = json_object_new_int(decode_datetime(&buf[1]));
  		break;
 	default:
-		fprintf(stderr, "ERROR: Unsupported COSEM data type: %d (%02x)\n", buf[0], buf[0]);
+		err("Unsupported COSEM data type: %d (%02x)\n", buf[0], buf[0]);
 	}
 	if (len > buflen) {
-		fprintf(stderr, "ERROR: Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
+		err("Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
 		goto err;
 	}
 	if (*ret)
@@ -628,7 +639,7 @@ static json_object *parse_llc(unsigned char *buf, size_t buflen)
 	json_object *tmp;
 
 	if (buf[0] != 0xe6 || buf[1] != 0xe7 || buf[2] != 0x00) {
-		fprintf(stderr, "Invalid LLC header: %02x %02x %02x\n", buf[0], buf[1], buf[2]);
+		err("Invalid LLC header: %02x %02x %02x\n", buf[0], buf[1], buf[2]);
 		return NULL;
 	}
 
@@ -666,7 +677,7 @@ static bool parse_payload(unsigned char *buf, size_t buflen, json_object *json)
 
 	p = &buf[3];
 	if (p[0] != 0x0f) {
-		fprintf(stderr, "The xDLMS APDU must be 'data-notification' [15], not [%d], according to IEC 62056-7-5:2017\n", p[0]);
+		err("The xDLMS APDU must be 'data-notification' [15], not [%d], according to IEC 62056-7-5:2017\n", p[0]);
 		return false;
 	}
 	p++;
@@ -1304,6 +1315,7 @@ static json_object *get_value(json_object *val, json_object *values)
 /* FIMXE: qos should be configurable? */
 static int publish(struct mosquitto *mosq, json_object *pubdata)
 {
+	static int reconnect = 1;
 	static int mid = 1;
 	const char *pub;
 	size_t publen;
@@ -1322,7 +1334,7 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 		pub = json_object_to_json_string_ext(val, JSON_C_TO_STRING_PLAIN);
 		publen = strlen(pub);
 		if (mosquitto_publish(mosq, &mid, t, publen, pub, 0, false)) { /* QoS = 0 */
-			debug("mqtt broker went away -reconnecting\n");
+		        info("mqtt broker went away -reconnecting (%d)\n", reconnect++);
 			mosquitto_reconnect(mosq);
 		}
 	}
@@ -1335,10 +1347,10 @@ static void add_hexdump(json_object *pubcfg, json_object *pubdata, const char *t
 	int i, pos = 0;
 	bool do_pub = printbuffer && json_object_object_get_ex(pubcfg, type, NULL);
 
-	/* debug header on stderr */
-	if (debug)
-		fprintf(stderr, "*** %s ***\n", type);
+	/* printing debug header on stderr */
+	debug( "*** %s ***\n", type);
 
+	/* need separate formatting because of the line breaks... */
 	for (i=0; i<plen; i++) {
 		if (debug)
 			fprintf(stderr, "%02hhx%c", p[i], (i + 1) % 16 ? ' ' : '\n');
@@ -1448,7 +1460,7 @@ nextframe:
 					framelen = -1;
 					cur = rbuf;
 				} else { // realign to start of buffer
-					debug("moving frame to start of buffer to make it fit\n");
+					debug("moving frame from pos %zu to start of buffer to make it fit\n", hdlc - rbuf);
 					memmove(rbuf, hdlc, cur - hdlc);
 					cur -= hdlc - rbuf;
 					hdlc = rbuf;
@@ -1819,7 +1831,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* print banner */
-			fprintf(stderr, "%s version %s running on %s\n", progname, VERSION, hostname);
+			info("%s version %s running on %s\n", progname, VERSION, hostname);
 
         /* initialize mqtt client and read buffer */
 	mosquitto_lib_init();
@@ -1836,7 +1848,7 @@ int main(int argc, char *argv[])
 	/* read config file */
 	read_config(cfgfile, (char *)buf, BUFSIZE);
 	if (!cfg)
-		fprintf(stderr, "Failed to parse '%s' - will not publish anything to MQTT broker '%s'\n", cfgfile, broker);
+		err("Failed to parse '%s' - will not publish anything to MQTT broker '%s'\n", cfgfile, broker);
 	else
 		debug("*** configuration ***\n%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
 
@@ -1847,7 +1859,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_TLS
 	if (certfile || keyfile) {
 		if (!certfile || !keyfile) {
-			fprintf(stderr, "Need both cert and key for TLS\n");
+			err("Option '%s' is required for MQTT over TLS\n", certfile ? "--key" : "--cert");
 			goto err;
 		}
 		/* set default port for MQTTS if not set by command line option */
