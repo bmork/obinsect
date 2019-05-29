@@ -1,0 +1,22 @@
+{
+    "topicmap" : {
+	"/obinsect/log/debug"        : "debug",
+	"/obinsect/log/info"         : "info",
+	"/obinsect/log/error"        : "error",
+	"/obinsect/websocket/power"  : "Power",
+	"/obinsect/json/realtime"    : "alias",
+	"/obinsect/json/counters"    : [
+	    "timestamp",
+	    "MeterTime",
+	    "CumulativeEnergy",
+	    "CumulativeEnergyExport",
+	    "CumulativeReactiveEnergy",
+	    "CumulativeReactiveEnergyExport"
+	]
+    },
+    "obisdefs" : [
+	"/etc/obinsect/aidon_v0001.json",
+	"/etc/obinsect/kfm_001.json",
+	"/etc/obinsect/kamstrup_v0001.json"
+    ]
+}

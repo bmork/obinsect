@@ -39,19 +39,133 @@ Published value format:
 Example: ./obinsectd -s /dev/ttyUSB0 -b broker.example.com
 ```
 
-The serial device is the only option required.  This should normally
-be an USB to M-BUS bridge connected to a supported meter. Using **-**
-as serial device makes obinsectd to read packes from **stdin**
-instead.  This can be used to feed it pre-recorded samples.
+### -d or --debug
+
+Turns on very verbose debug output to stderr. Note that this is
+independent of the MQTT debug channel described [below](#Logging).
+
+
+### -c or --config
+
+Change location of the JSON formatted configuration file.  See
+[below](#Config) for details
+
+### -s or --serial
+
+The serial device is the only mandatory option.  This should normally
+be an USB to M-BUS bridge connected to a supported meter
+
+Using **"-"** as serial device to read packes from **stdin** instead.
+This is useful for feeding it replayed recorded samples.
+
+### MQTT client related options
 
 **obinsectd** will attempt an anonymous MQTT connection to a broker
 running on the same host by default. It will continue without MQTT if
 this fails for any reason. It will not subscribe to any MQTT topics,
 and it will only publish if configured to do so using the
-configuration file.
+[configuration file](#Config).
 
 
-## JSON config file
+### <a name="Unscaled"></a>--unscaled
+
+**obinsectd** will by default scale all numeric values according to
+the OBIS list definition. This means that many values end up as floats
+instead of integers, which might be undesirable.  The scaling will
+also suffer from the usual floating point division issues, where the
+number is off by a small fraction way outside the precision.
+
+
+Typical example of a published **"alias"** object (see [below](#Predefined)):
+```javascript
+{
+  "ListId": "KFM_001",
+  "SerialNumber": "MA304H3E",
+  "Model": 1176,
+  "Power": 0,
+  "PowerExport": 131,
+  "ReactivePower": 0,
+  "ReactivePowerExport": 2208,
+  "CurrentL1": 3.841,
+  "CurrentL2": 3.794,
+  "CurrentL3": 2.3890000000000002,
+  "VoltageL1": 0,
+  "VoltageL2": 239.70000000000002,
+  "timestamp": 1559117502
+}
+```
+
+Setting this option will disable the scaling, making **obinsectd**
+publish the raw integer values as received.
+
+Same example as above, with **--unscaled** set:
+
+```javascript
+{
+  "ListId": "KFM_001",
+  "SerialNumber": "MA304H3E",
+  "Model": 1176,
+  "Power": 0,
+  "PowerExport": 131,
+  "ReactivePower": 0,
+  "ReactivePowerExport": 2208,
+  "CurrentL1": 3841,
+  "CurrentL2": 3794,
+  "CurrentL3": 2389,
+  "VoltageL1": 0,
+  "VoltageL2": 2397,
+  "timestamp": 1559117502
+}
+```
+
+### --units
+
+By default all values are publish as JSON numbers, either integer or
+double. This makes the values usable on the other end without further
+parsing.  This suits most usecases like updating gauges, databases etc
+best.  The unit is not published at all in this case.
+
+
+Setting **"--units"** will change all values with a unit defined in
+the OBIS list definiton, to strings.  The strings are formatted with
+the number of decimals specified in the list definition, followed by a
+space and the unit.
+
+This can be useful for usecase where published values are used as
+strings anyway, for example in a simple text log or in a text element
+on a web page.
+
+Note that this setting is global.  It is currently not possible to
+publish some topics or values with units and some without.
+
+**--units** implies scaling, and will silently re-enable scaling even
+if [**--unscaled**](#Unscaled) is set.
+
+
+Reusing the [**"alias"**](#Predefined) object example, but this time with units
+enabled:
+
+```javascript
+{
+  "ListId": "KFM_001",
+  "SerialNumber": "MA304H3E",
+  "Model": 1176,
+  "Power": "0 W",
+  "PowerExport": "131 W",
+  "ReactivePower": "0 Var",
+  "ReactivePowerExport": "2208 Var",
+  "CurrentL1": "3.841 A",
+  "CurrentL2": "3.794 A",
+  "CurrentL3": "2.389 A",
+  "VoltageL1": "0.0 V",
+  "VoltageL2": "239.7 V",
+  "timestamp": 1559117502
+}
+
+```
+
+
+## <a name"Config"></a>JSON config file
 
 **obinsect** can be used for debugging the HAN port without any
 configuration.  Simply run it with the -d (--debug) option.  The
@@ -67,39 +181,39 @@ But its real advantage lies in the configurable mapping of data to
 MQTT topics, as well as fully configurable OBIS code lists.  The
 configuration file has two sections:
 
- 1. "topicmap" - mapping MQTT topics to values
- 2. "obisdefs" - list of JSON files with OBIS code defintions
+ 1. ["topicmap"](#Topicmap) - mapping MQTT topics to values
+ 2. ["obisdefs"](#Obisdefs) - list of JSON files with OBIS code defintions
 
-This is an example:
+This is a complete configuration example:
 
 ```javascript
 {
-	"topicmap" :
-		{
-			"/obinsect/json/alias"       : "alias",
-			"/obinsect/json/powerandtime": [ "timestamp", "1-0:1.7.0.255" ],
-			"/obinsect/websocket/power"  : "Power",
-			"/obinsect/counters"   :
-				[
-					"timestamp",
-					"MeterTime",
-					"CumulativeEnergy",
-					"CumulativeEnergyExport",
-					"CumulativeReactiveEnergy",
-					"CumulativeReactiveEnergyExport"
-				]
-},
-	"obisdefs" :
-		[
-			"/etc/obinsect/aidon_v0001.json",
-			"/etc/obinsect/kfm_001.json",
-			"/etc/obinsect/kamstrup_v0001.json"
+    "topicmap" : {
+		"/obinsect/log/debug"        : "debug",
+		"/obinsect/log/info"         : "info",
+		"/obinsect/log/error"        : "error",
+		"/obinsect/websocket/power"  : "Power",
+		"/obinsect/json/powerandtime": [ "timestamp", "1-0:1.7.0.255" ],
+		"/obinsect/json/realtime"    : "alias",
+		"/obinsect/json/counters"    : [
+			"timestamp",
+			"MeterTime",
+			"CumulativeEnergy",
+			"CumulativeEnergyExport",
+			"CumulativeReactiveEnergy",
+			"CumulativeReactiveEnergyExport"
 		]
+	},
+	"obisdefs" : [
+		"/etc/obinsect/aidon_v0001.json",
+		"/etc/obinsect/kfm_001.json",
+		"/etc/obinsect/kamstrup_v0001.json"
+    ]
 }
 ```
 
 
-### topicmap
+### <a name="Topicmap"></a>topicmap
 
 Any number of MQTT topics can be given, including none.  No specific
 topic structure is assumed.  The example above is simply an example.
@@ -111,20 +225,20 @@ one or more values received from the meter. I.e. **metadata** is not
 considered when deciding whether to publish to a topic or not.
 
 The **value** specification can be
- 1. an OBIS code in text representation, e.g **"1-1:0.2.129.255"**
- 2. a code alias defined in the currently selected code list, e.g. **"Power"**
- 3. the **"date-time"** field of the DLMS/COSEM packet
- 4. a metadata variable (see below for spec), e.g. **"timestamp"**
- 5. one of two predefined objects: **"normal"** or **"alias"**
- 6. a list combining one or more of the above
- 7. special debug values: **"rawpacket"**, **"parserdata"** or one of the
-    loglevels **"debug"**, **"info"** or **"error"**
+ 1. an [OBIS code](#Obiscode) in text representation, e.g **"1-1:0.2.129.255"**
+ 2. a [code alias](#Codealias) defined in the currently selected code list, e.g. **"Power"**
+ 3. the [**"date-time"**](#Datetime) field of the DLMS/COSEM packet
+ 4. a [metadata](#Metadata) variable (see below for spec), e.g. **"timestamp"**
+ 5. one of two [predefined objects](#Predefined): **"normal"** or **"alias"**
+ 6. a [list combining](#Complex) one or more of the above
+ 7. special [debug](#Debug) values: **"rawpacket"**, **"parserdata"** or one of the
+    [loglevels](#Logging) **"debug"**, **"info"** or **"error"**
 
 
-#### OBIS code
+#### <a name="Obiscode"></a>OBIS code
 
 The value is converted to its matching JSON representation,
-considering scaling and unit conversion as described below.  By
+considering scaling and unit conversion as described above.  By
 default, numeric values are returned as numbers scaled according to
 the OBIS list definition.
 
@@ -138,7 +252,7 @@ binary object type for **"MeterTime"**.  This is corrected to
 **"date-time"** by obinsectd.
 
 
-#### aliases
+#### <a name="Codealias"></a>aliases
 
 The OBIS code lists include an **"alias"** section. These names can be
 used instead of the actual code.  The value transformation rules are
@@ -156,7 +270,7 @@ list definition, provided a few rules are followed:
 3. aliases must not collide with any other value code word. An easy
    way to ensure this is by capitalizing the first letter.
 
-#### date-time
+#### <a name="Datetime"></a>date-time
 
 DLMS/COSEM packets include an optional **"date-time"** field in their
 header. This is available as a value, **if** sent by the meter.  Note
@@ -194,7 +308,7 @@ the parsed JSON object, including this bug. Possibly in the other end
 of an MQTT publish-subscribe chain...
 
 
-#### metadata
+#### <a name="Metadata"></a>metadata
 
 obinsectd generates a number of internal variables every time a packet
 is parsed:
@@ -212,7 +326,7 @@ All of these can be included at once as a separate JSON object by
 specifying the value **"metadata"**.
 
 
-#### predefined objects
+#### <a name="Predefined"></a>predefined objects
 
 **obinsectd** can publish all values received from the meter as a
 single JSON object, as a normalized and flattened list of **key => value**
@@ -271,8 +385,7 @@ The exact same packet published using the **"alias"** value:
 ```
 
 
-
-#### complex objects
+#### <a name="Complex"></a>complex objects
 
 Specifying a list of values from the sets defined above makes obinsect
 publish all the values as a single JSON object.  For example, this
@@ -303,7 +416,7 @@ questionable...
 
 
 
-#### publishing debug info to MQTT
+#### <a name="Debug"></a>publishing debug info to MQTT
 
 
 **obinsectd** can also use MQTT for log and debug messages. This includes
@@ -425,7 +538,7 @@ An example:
 ```
 
 
-##### log output
+##### <a name="Logging"></a>log output
 
 **obinsectd** will log some debug info to **stderr** by default, but
 can also publish the log messages to MQTT topics, using one of the
@@ -434,6 +547,31 @@ topic.
 
 Log messages related to MQTT are never published, for obvious
 reasons...
+
+
+
+### <a name="Obisdefs"></a>OBIS code lists
+
+Each meter vendor has defined specifics sets of OBIS codes and the
+intervals these are published.  These lists define the relative order
+of the values, resolution and scaling, and units.
+
+**obinsect** extends the list definitions with a code alias for each
+OBIS code. These aliases are examples only, and can be changed as
+required.
+
+The order of the OBIS code to alias map is significant, however, and
+must not be changed. Values are sometimes sent by the meter without
+any key or code label. The relative index into the **alias** map is
+used to map such values to their respective OBIS codes.
+
+
+**obinsect** comes with three OBIS code lists which can be used as
+examples when adding support for other meters:
+
+	1. aidon_v0001.json
+	2. kfm_001.json
+	3. kamstrup_v0001.json
 
 
 

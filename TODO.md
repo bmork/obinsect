@@ -1,12 +1,8 @@
 # obinsect is a Work-in-Progress
 
-There will be changes to the configuration file syntax!
+There might be changes to the configuration file syntax!
 
 Items which needs to be fixed in arbitrary order:
-
-## OBIS list parsing
-
-* Include some metadata
 
 ## Memory management
 
@@ -15,7 +11,6 @@ Items which needs to be fixed in arbitrary order:
   
 ## MQTT connection
 
-* make sure the client will attempt to reconnect on errors
 * complete and verify all supported authentication methods, including
   TLS client certificates
 
@@ -23,14 +18,6 @@ Items which needs to be fixed in arbitrary order:
 
 * test and robustify, making sure the serial device can go away and
   reappear without breaking stuff
-
-## Publishing
-
-* Create a packet metadata section _before_ parsing, including stuff like
-  1. timestamp
-  2. program name
-  3. program version
-
 
 ## Code refactoring
 
@@ -43,23 +30,15 @@ Items which needs to be fixed in arbitrary order:
 * add daemon mode?
 * include OpenWrt packaging example?
 * include systemd unit?
-* add working config example, which could be used as-is?
 
-## Logging
-
-* add real logging, with at least debug, error and info levels
-* support logging of all levels to MQTT.  Maybe modify topic config
-  syntax to allow a LEVEL variable or similar?
 
 ## Main config file
 
-* provide some sane defaults?
-* add log configuration?
-* add a settings section. Some possibilities:
+* allow per-topic settings? Some possibilities:
    1. timestamp format
-   2. include units (implies values as strings)
-   
-
+   2. unit/scaling
+   3. QoS
+* move some of the far too many command line option into the config file?
 
 
 ## ++++
