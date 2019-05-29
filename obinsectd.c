@@ -73,24 +73,92 @@ static bool units = false;
 /* shared print buffer */
 static char *printbuffer = NULL;
 
+/* mosquitto client */
+struct mosquitto *mosq = NULL;
 
+/* logging stuff */
 static bool debug = false;
 
-#define debug(format, arg...) do { if (debug) fprintf(stderr, "DEBUG: " format, arg); } while (0)
-#define err(format, arg...) do { fprintf(stderr, "ERROR: " format, arg); } while (0)
-#define info(format, arg...) do { fprintf(stderr, "INFO: " format, arg); } while (0)
+#define _logit_nomqtt(lvl, format, arg...)				\
+	do {								\
+	switch (lvl) {							\
+	case LOG_DEBUG:							\
+		if (debug)					       	\
+			fprintf(stderr, "DEBUG: " format, arg);		\
+		break;							\
+	case LOG_INFO:							\
+       		fprintf(stderr, "INFO: " format, arg);			\
+		break;						       	\
+	case LOG_ERROR:							\
+       		fprintf(stderr, "ERROR: " format, arg);			\
+	}								\
+	} while (0)
+
+#define _logit(lvl, format, arg...)					\
+	do {								\
+	if (!printbuffer) {						\
+		_logit_nomqtt(lvl, format, arg);			\
+	} else {							\
+		size_t __len;						\
+		__len = snprintf(printbuffer, BUFSIZE, format, arg);	\
+		if (__len >= BUFSIZE)					\
+			__len = BUFSIZE - 1;				\
+		_logit_nomqtt(lvl, "%s", printbuffer);			\
+		while (__len > 1 && printbuffer[__len - 1] == '\n')	\
+			__len--;					\
+		log2mqtt(lvl, printbuffer, __len);			\
+	}								\
+	} while (0)
+
+#define debug(format, arg...)	_logit(LOG_DEBUG, format, arg)
+#define err(format, arg...)	_logit(LOG_ERROR, format, arg)
+#define info(format, arg...)	_logit(LOG_INFO, format, arg)
+#define debug_nomqtt(format, arg...)	_logit_nomqtt(LOG_DEBUG, format, arg)
+#define err_nomqtt(format, arg...)	_logit_nomqtt(LOG_ERROR, format, arg)
+#define info_nomqtt(format, arg...)	_logit_nomqtt(LOG_INFO, format, arg)
+
+enum log_levels {
+	LOG_DEBUG = 0,
+	LOG_INFO,
+	LOG_ERROR,
+	_MAX_LOG_LEVELS
+};
+
+#define MAX_LOG_TOPICS 4
+
+static const char *log_topic[_MAX_LOG_LEVELS][MAX_LOG_TOPICS] = {};
+
+static void mqtt_publish(const char *topic, const char *msg, size_t msglen)
+{
+	static int reconnect = 1;
+	static int mid = 1;
+
+	if (mosquitto_publish(mosq, &mid, topic, msglen, msg, 0, false)) { /* QoS = 0 */
+		info_nomqtt("mqtt broker went away -reconnecting (%d)\n", reconnect++);
+		mosquitto_reconnect(mosq);
+	}
+}
+
+static int log2mqtt(int lvl, const char *msg, size_t msglen)
+{
+	int i;
+
+	for (i = 0; i < MAX_LOG_TOPICS && log_topic[lvl][i]; i++)
+		mqtt_publish(log_topic[lvl][i], msg, msglen);
+	return i;
+}
 
 static void libmosquitto_log_callback(struct mosquitto *mosq, void *userdata, int level, const char *str)
 {
 	switch (level) {
 	case MOSQ_LOG_ERR:
-		err("mqtt: %s\n", str);
+		err_nomqtt("mqtt: %s\n", str);
 		break;
 	case MOSQ_LOG_DEBUG:
-		debug("mqtt: %s\n", str);
+		debug_nomqtt("mqtt: %s\n", str);
 		break;
 	default:
-		info("mqtt: %s\n", str);
+		info_nomqtt("mqtt: %s\n", str);
 	}
 }
 
@@ -159,7 +227,9 @@ static int serial_open(const char *dev)
 	        cfsetspeed(&terminal_data, B2400);  // 2400 8N1
 		tcsetattr(fd, TCSANOW, &terminal_data);
 	}
-	debug("opened %s\n", dev);
+
+	/* MQTT session is not yet ready */
+	debug_nomqtt("opened %s\n", dev);
 	return fd;
 }
 
@@ -354,7 +424,7 @@ static unsigned char *hdlc_verify(unsigned char *buf, size_t buflen, json_object
 
 	/* check start and stop markers */
 	if (buf[0] != CONTROL || buf[buflen -1] != CONTROL) {
-		err("HDLC frame is missing start (%c) or stop (%c) markers\n", buf[0], buf[buflen -1]);
+		err("HDLC frame is missing start or stop markers (%#04x)\n", CONTROL);
 		return NULL;
 	}
 
@@ -1313,13 +1383,10 @@ static json_object *get_value(json_object *val, json_object *values)
 }
 
 /* FIMXE: qos should be configurable? */
-static int publish(struct mosquitto *mosq, json_object *pubdata)
+static int publish(json_object *pubdata)
 {
-	static int reconnect = 1;
-	static int mid = 1;
-	const char *pub;
-	size_t publen;
 	json_object *topics, *val;
+	const char *pub;
 
 	/* nothing published unless configured */
 	if (!cfg || !json_object_object_get_ex(cfg, "topicmap", &topics))
@@ -1329,14 +1396,8 @@ static int publish(struct mosquitto *mosq, json_object *pubdata)
 		val = get_value(tmp, pubdata);
 		if (!val)
 			continue;
-
-		// pub = json_object_to_json_string_length(normal, JSON_C_TO_STRING_PLAIN, &publen); /* requires libjson-c version 0.13+ */
 		pub = json_object_to_json_string_ext(val, JSON_C_TO_STRING_PLAIN);
-		publen = strlen(pub);
-		if (mosquitto_publish(mosq, &mid, t, publen, pub, 0, false)) { /* QoS = 0 */
-		        info("mqtt broker went away -reconnecting (%d)\n", reconnect++);
-			mosquitto_reconnect(mosq);
-		}
+		mqtt_publish(t, pub, strlen(pub));
 	}
 
 	return 0;
@@ -1347,8 +1408,8 @@ static void add_hexdump(json_object *pubcfg, json_object *pubdata, const char *t
 	int i, pos = 0;
 	bool do_pub = printbuffer && json_object_object_get_ex(pubcfg, type, NULL);
 
-	/* printing debug header on stderr */
-	debug( "*** %s ***\n", type);
+	/* printing debug header on stderr - don't want to publish this... */
+	debug_nomqtt( "*** %s ***\n", type);
 
 	/* need separate formatting because of the line breaks... */
 	for (i=0; i<plen; i++) {
@@ -1410,7 +1471,7 @@ static void add_metadata(json_object *pubcfg, json_object *pubdata, json_object 
 	add_keyval(pubcfg, pubdata, "metadata", meta, false);
 }
 
-static int read_and_parse(int fd, struct mosquitto *mosq, unsigned char *rbuf, size_t rbuflen)
+static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
 {
 	unsigned char *payload, *cur, *hdlc;
 	struct pollfd fds[1];
@@ -1484,9 +1545,13 @@ nextframe:
 		add_hexdump(pubcfg, pubdata, "rawpacket", hdlc, framelen > 0 ? framelen + 2 : 64);
 		add_metadata(pubcfg, pubdata, json, &tv);
 		add_keyval(pubcfg, pubdata, "parserdata", json, true);
-		debug("*** parser data ***\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
-		debug("*** publish data ***\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
-		publish(mosq, pubdata);
+
+		/* don't want these published on the MQTT debug channel */
+		debug_nomqtt("*** parser data ***\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+		debug_nomqtt("*** publish data ***\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
+
+		/* publish everything */
+		publish(pubdata);
 
 		/* drop all per-frame objects */
 		json_object_put(json);
@@ -1540,6 +1605,29 @@ static void set_publish(json_object *pub, const char *key, json_object *arraynam
 		json_object_array_add(tmp, arrayname);
 }
 
+static bool is_logging(const char *lvl, const char *topic)
+{
+	int i, level;
+
+	if (!strcmp(lvl, "debug"))
+		level = LOG_DEBUG;
+	else if (!strcmp(lvl, "info"))
+		level = LOG_INFO;
+	else if (!strcmp(lvl, "error"))
+		level = LOG_ERROR;
+	else
+		return false;
+
+	for (i = 0; i < MAX_LOG_TOPICS; i++)
+		if (!log_topic[level][i])
+			break;
+	if (i >= MAX_LOG_TOPICS)
+		err("Too many log topics for log level '%s'\n", lvl);
+	else
+		log_topic[level][i] = topic;
+	return true;
+}
+
 static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 {
 	json_object *topics, *publish, *arrayname;
@@ -1576,6 +1664,11 @@ static void process_cfg(json_object *cfg, char *buf, size_t bufsize)
 			json_object_object_add(topics, t,  arrayname);
 		} else {
 			name = json_object_get_string(tmp);
+
+			/* logging topics are special */
+			if (is_logging(name, t))
+				continue;
+
 			set_publish(publish, name, NULL);
 
 			/* include "timestamp" in the special "normal" and "alias" objects */
@@ -1734,8 +1827,6 @@ int main(int argc, char *argv[])
 	int opt, serfd = -1, ret = 0;
 	static unsigned char *buf = NULL;
 	char *cfgfile = CONFIG_FILE;
-	// mosquitto client
-	struct mosquitto *mosq = NULL;
 	// mosquitto opts
 	char *mqttid = NULL;
 	char *broker = MQTT_BROKER;
@@ -1848,9 +1939,9 @@ int main(int argc, char *argv[])
 	/* read config file */
 	read_config(cfgfile, (char *)buf, BUFSIZE);
 	if (!cfg)
-		err("Failed to parse '%s' - will not publish anything to MQTT broker '%s'\n", cfgfile, broker);
+		err_nomqtt("Failed to parse '%s' - will not publish anything to MQTT broker '%s'\n", cfgfile, broker);
 	else
-		debug("*** configuration ***\n%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
+		debug_nomqtt("*** configuration ***\n%s\n", json_object_to_json_string_ext(cfg, JSON_C_TO_STRING_PRETTY));
 
 	/* configure broker connection */
 	if (mqttuser)
@@ -1859,7 +1950,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_TLS
 	if (certfile || keyfile) {
 		if (!certfile || !keyfile) {
-			err("Option '%s' is required for MQTT over TLS\n", certfile ? "--key" : "--cert");
+			err_nomqtt("Option '%s' is required for MQTT over TLS\n", certfile ? "--key" : "--cert");
 			goto err;
 		}
 		/* set default port for MQTTS if not set by command line option */
@@ -1879,7 +1970,7 @@ int main(int argc, char *argv[])
 	mosquitto_connect(mosq, broker, port, keepalive);
 
 	/* loop forever */
-	read_and_parse(serfd, mosq, buf, BUFSIZE);
+	read_and_parse(serfd, buf, BUFSIZE);
 
 err:
 
