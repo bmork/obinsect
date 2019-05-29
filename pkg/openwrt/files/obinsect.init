@@ -1,0 +1,77 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2019 Bjørn Mork <bjorn@mork.no>
+
+START=90
+STOP=01
+
+USE_PROCD=1
+OBINSECT_CONF=/tmp/obinsect.conf
+
+add_topic()
+{
+    local _name="$1"
+    local _topic
+    local _value
+    local _tmp
+    
+    config_get _topic "$_name" 'topic'
+    config_get _value "$_name"  'value'
+    if [ "${_value% *}" == "$_value" ]; then
+	json_add_string "$_topic" "$_value"
+    else
+	json_add_array "$_topic"
+	for _tmp in $_value; do
+	    json_add_string "" "$_tmp"
+	done
+	json_close_array
+    fi
+}
+
+write_obinsect_conf()
+{
+    . /lib/functions.sh
+    . /usr/share/libubox/jshn.sh
+    config_load 'obinsect'
+
+    json_init
+    json_add_object 'topicmap'
+    config_foreach add_topic 'publish'
+    json_close_object
+
+
+    config_get obisdefs 'config' 'obisdefs'
+    json_add_array 'obisdefs'
+    for obisdef in $obisdefs; do
+	json_add_string "" "$obisdef"
+    done
+    json_close_array
+
+
+    json_dump > "$OBINSECT_CONF"
+}
+
+start_service() {
+
+	write_obinsect_conf
+	config_get serial 'config' 'serial'
+	config_get broker 'config' 'broker'
+
+	procd_open_instance
+	procd_set_param command /usr/sbin/obinsectd
+	procd_append_param command -c "$OBINSECT_CONF"
+	procd_append_param command -s "$serial"
+	procd_append_param command -b "$broker"
+	procd_set_param respawn
+	procd_close_instance
+}
+
+service_running() {
+	pgrep -x /usr/sbin/obinsectd &> /dev/null
+}
+
+reload_service() {
+	running || return 1
+	write_obinsect_conf
+	return 0
+}
+
