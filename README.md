@@ -165,7 +165,7 @@ enabled:
 ```
 
 
-## <a name"Config"></a>JSON config file
+## <a name="Config"></a>JSON config file
 
 **obinsect** can be used for debugging the HAN port without any
 configuration.  Simply run it with the -d (--debug) option.  The
