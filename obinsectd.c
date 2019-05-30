@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <mosquitto.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -47,6 +48,10 @@
 #define MQTT_PORT	1883
 #define MQTTS_PORT	8883
 #define MQTT_KEEPALIVE	60
+
+/* support config refresh */
+static bool reread_cfg = false;
+static char *cfgfile = CONFIG_FILE;
 
 /* static metadata */
 static char *progname = NULL;
@@ -70,7 +75,8 @@ static bool units = false;
 /* defines size of both the read buffer and the print buffer.- because I'm lazy... */
 #define BUFSIZE (1024 * 2)
 
-/* shared print buffer */
+/* shared buffers */
+static unsigned char *buf = NULL;
 static char *printbuffer = NULL;
 
 /* mosquitto client */
@@ -523,7 +529,7 @@ static time_t decode_datetime(unsigned char *buf)
 }
 
 /*
- * Ref BS E﻿N 62056-6-2:2013, page 30, "Table 3 – Enumerated values for physical units".
+ * Ref BS EN 62056-6-2:2013, page 30, "Table 3 - Enumerated values for physical units".
  * according to "Hårek"
  */
 static char *cosem_unit_enum(unsigned char e)
@@ -1501,6 +1507,8 @@ static void add_metadata(json_object *pubcfg, json_object *pubdata, json_object 
 	add_keyval(pubcfg, pubdata, "metadata", meta, false);
 }
 
+static void read_config();
+
 static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
 {
 	unsigned char *payload, *cur, *hdlc;
@@ -1562,6 +1570,15 @@ nextframe:
 		/* still waiting for the complete frame? */
 		if (framelen > 0 && (cur - hdlc) < (framelen + 2))
 			continue;
+
+		/* we might have been requested to read the config file again */
+		if (reread_cfg) {
+			reread_cfg = false;
+			info("reading new configuration from '%s'\n", cfgfile);
+			if (cfg)
+				json_object_put(cfg);
+			read_config();
+		}
 
 		/* Yay! We got a complete frame - let's save some metadata now */
 		json = save_metadata(framelen, &tv);
@@ -1752,13 +1769,15 @@ static json_object *parse_obisfile(json_object *lists, const char *fname, char *
 	return tmp;
 }
 
-static void read_config(const char *fname, char *buf, size_t bufsize)
+static void read_config()
 {
+	char *rbuf = (char *)buf;
+	size_t bufsize = BUFSIZE;
 	json_object *tmp, *list;
 	const char *name;
 	int i           ;
 
-	cfg = read_json_file(fname, buf, bufsize);
+	cfg = read_json_file(cfgfile, rbuf, bufsize);
 	if (!cfg)
 		return;
 
@@ -1769,13 +1788,13 @@ static void read_config(const char *fname, char *buf, size_t bufsize)
 
 		for (i = 0; i < json_object_array_length(tmp); i++) {
 			name = json_object_get_string(json_object_array_get_idx(tmp, i));
-			if (!parse_obisfile(list, name, buf, bufsize))
+			if (!parse_obisfile(list, name, rbuf, bufsize))
 				debug("failed to parse '%s'\n", name);
 		}
 	}
 
 	/* post process config - adding helper structures */
-	process_cfg(cfg, buf, bufsize);
+	process_cfg(cfg, (char *)rbuf, bufsize);
 }
 
 static struct option main_options[] = {
@@ -1851,12 +1870,18 @@ static void usage()
 
 }
 
+static void sig_handler(int sig)
+{
+	switch (sig) {
+	case SIGHUP:
+		reread_cfg = true;
+		break;
+	}
+}
 
 int main(int argc, char *argv[])
 {
 	int opt, serfd = -1, ret = 0;
-	static unsigned char *buf = NULL;
-	char *cfgfile = CONFIG_FILE;
 	// mosquitto opts
 	char *mqttid = NULL;
 	char *broker = MQTT_BROKER;
@@ -1877,6 +1902,9 @@ int main(int argc, char *argv[])
 	/* initialize global vars */
 	progname = argv[0];
 	gethostname(hostname, sizeof(hostname));
+
+	/* deal with signals */
+	signal(SIGHUP, sig_handler);
 
 	while ((opt = getopt_long(argc, argv, "?hdb:c:i:k:p:P:s:u", main_options, NULL)) != -1) {
 		switch(opt) {
@@ -1967,7 +1995,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* read config file */
-	read_config(cfgfile, (char *)buf, BUFSIZE);
+	read_config();
 	if (!cfg)
 		err_nomqtt("Failed to parse '%s' - will not publish anything to MQTT broker '%s'\n", cfgfile, broker);
 	else
