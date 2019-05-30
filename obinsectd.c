@@ -569,20 +569,29 @@ static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool
 
 	switch (intlen) {
 	case 1:
-		lo = raw[1];
+		if (sign)
+			lo = (char)raw[1];
+		else
+			lo = raw[1];
 		break;
 	case 2:
-		lo = raw[1] << 8 | raw[2];
+		if (sign)
+			lo = (__int16_t)(raw[1] << 8 | raw[2]);
+		else
+			lo = raw[1] << 8 | raw[2];
 		break;
 	case 4:
-		lo = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
+		if (sign)
+			lo = (__int32_t)(raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4]);
+		else
+			lo = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
 		break;
 	case 8:
 		hi = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
 		lo = raw[5] << 24 | raw[6] << 16 | raw[7] << 8 | raw[8];
 		return json_object_new_int64(sign ? (__int64_t)hi << 32 | lo : (__uint64_t)hi << 32 | lo);
 	}
-	return json_object_new_int(sign ? (__int32_t)lo : lo);
+	return json_object_new_int(lo);
 }
 
 /*
