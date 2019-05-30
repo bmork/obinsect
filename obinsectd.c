@@ -533,6 +533,8 @@ static char *cosem_unit_enum(unsigned char e)
 	case 27: return "W";
 	case 28: return "VA";
 	case 29: return "VAr";
+	case 30: return "Wh"; // guessed based on received values
+	case 32: return "VArh"; // guessed based on received values
 	case 33: return "A";
 	case 35: return "V";
 	default:
