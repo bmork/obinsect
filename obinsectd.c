@@ -1527,8 +1527,19 @@ static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
 
 	while (1) {
 		ret = poll(fds, 1, -1);
-		if (ret == -1)
+		if (ret == -1 && !reread_cfg)
 			return -errno;
+
+		/* we might have been requested to read the config file again */
+		if (reread_cfg) {
+			fds[0].revents = 0;
+			reread_cfg = false;
+			info("reading new configuration from '%s'\n", cfgfile);
+			if (cfg)
+				json_object_put(cfg);
+			read_config();
+			continue;
+		}
 
 		if (fds[0].revents & POLLIN)
 			rlen = read(fd, cur, rbuflen + rbuf - cur);
@@ -1570,15 +1581,6 @@ nextframe:
 		/* still waiting for the complete frame? */
 		if (framelen > 0 && (cur - hdlc) < (framelen + 2))
 			continue;
-
-		/* we might have been requested to read the config file again */
-		if (reread_cfg) {
-			reread_cfg = false;
-			info("reading new configuration from '%s'\n", cfgfile);
-			if (cfg)
-				json_object_put(cfg);
-			read_config();
-		}
 
 		/* Yay! We got a complete frame - let's save some metadata now */
 		json = save_metadata(framelen, &tv);
@@ -1872,6 +1874,7 @@ static void usage()
 
 static void sig_handler(int sig)
 {
+	debug("handling signal %d\n", sig);
 	switch (sig) {
 	case SIGHUP:
 		reread_cfg = true;
