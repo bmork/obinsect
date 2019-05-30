@@ -522,6 +522,25 @@ static time_t decode_datetime(unsigned char *buf)
 	return mktime(&t);
 }
 
+/*
+ * Ref BS E﻿N 62056-6-2:2013, page 30, "Table 3 – Enumerated values for physical units".
+ * according to "Hårek"
+ */
+static char *cosem_unit_enum(unsigned char e)
+{
+	static char ret[17]; /* "unknown-unit-255" is 16 bytes */
+	switch (e) {
+	case 27: return "W";
+	case 28: return "VA";
+	case 29: return "VAr";
+	case 33: return "A";
+	case 35: return "V";
+	default:
+		sprintf(ret, "unknown-unit-%u", e);
+		return ret;
+	}
+}
+
 static char *cosem_typestr(unsigned char type)
 {
 	/* ref DLMS Blue-Book-Ed-122-Excerpt.pdf section 4.1.5 "Common data types" */
@@ -682,8 +701,8 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
  		*ret = cosem_object_new_int(buf, len++, false);
 		break;
 	case 22: // enum
-		len = 1;
- 		*ret = cosem_object_new_int(buf, len++, false);
+		len = 2;
+ 		*ret = json_object_new_string(cosem_unit_enum(buf[1]));
 		break;
 	case 25: // date-time
 		len = 1 + 12;
