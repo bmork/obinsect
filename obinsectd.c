@@ -1532,12 +1532,17 @@ static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
 
 		/* we might have been requested to read the config file again */
 		if (reread_cfg) {
-			fds[0].revents = 0;
 			reread_cfg = false;
 			info("reading new configuration from '%s'\n", cfgfile);
 			if (cfg)
 				json_object_put(cfg);
+			cfg = NULL;
 			read_config();
+
+			/* the publish config must be renewed too */
+			if (!json_object_object_get_ex(cfg, "publish", &pubcfg))
+				pubcfg = NULL;
+
 			continue;
 		}
 
@@ -1778,6 +1783,13 @@ static void read_config()
 	json_object *tmp, *list;
 	const char *name;
 	int i           ;
+
+	/* reset before re-reading */
+	current_list = NULL;
+	memset(log_topic, 0, sizeof(log_topic));
+
+	if (cfg)
+		json_object_put(cfg);
 
 	cfg = read_json_file(cfgfile, rbuf, bufsize);
 	if (!cfg)
