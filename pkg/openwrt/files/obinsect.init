@@ -72,6 +72,6 @@ service_running() {
 reload_service() {
 	running || return 1
 	write_obinsect_conf
-	return 0
+	procd_send_signal obinsect
 }
 
