@@ -1117,7 +1117,7 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 	if (!json_object_object_get_ex(pubcfg, key, &tmp))
 		return;
 
-	json_object_object_add(pub, key, val);
+	json_object_object_add(pub, key, json_object_get(val));
 	for (i = 0; i < json_object_array_length(tmp); i++) {
 		arrayname = json_object_get_string(json_object_array_get_idx(tmp, i));
 
@@ -1133,7 +1133,7 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 			obj = json_object_new_object();
 			json_object_object_add(pub, arrayname, obj);
 		}
-		json_object_object_add(obj, key, val);
+		json_object_object_add(obj, key, json_object_get(val));
 
 	}
 }
