@@ -38,6 +38,8 @@ Items which needs to be fixed in arbitrary order:
    1. timestamp format
    2. unit/scaling
    3. QoS
+   4. retained messages - useful for units, scalers, counters
+
 * move some of the far too many command line option into the config file?
 
 
