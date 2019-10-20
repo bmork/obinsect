@@ -629,7 +629,7 @@ static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool
  */
 static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object **ret)
 {
-	int i, len, n;
+	int i, n, len = 0;
 	json_object *myobj;
 	char fieldname[32]; /* "double-long-unsigned" is 20 bytes */
 
