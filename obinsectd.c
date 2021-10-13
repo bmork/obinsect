@@ -175,7 +175,7 @@ static void libmosquitto_log_callback(struct mosquitto *mosq, void *userdata, in
  */
 
 /* Table of CRCs for each possible byte, with a generator polynomial of 0x8408 */
-static const __uint16_t crc_table[256] = {
+static const uint16_t crc_table[256] = {
     0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
     0x8c48, 0x9dc1, 0xaf5a, 0xbed3, 0xca6c, 0xdbe5, 0xe97e, 0xf8f7,
     0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
@@ -211,9 +211,9 @@ static const __uint16_t crc_table[256] = {
 };
 
 /* Calculate the CRC for a buffer using a seed of 0xffff */
-static __uint16_t crc16(const char *buffer, size_t len)
+static uint16_t crc16(const char *buffer, size_t len)
 {
-    __uint16_t crc = 0xffff;
+    uint16_t crc = 0xffff;
 
     while (len--)
             crc = crc_table[(crc ^ *buffer++) & 0xff] ^ (crc >> 8);
@@ -593,7 +593,7 @@ static bool is_obis(unsigned char *code)
 
 static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool sign)
 {
-	__uint32_t hi, lo;
+	uint32_t hi, lo;
 
 	switch (intlen) {
 	case 1:
@@ -604,20 +604,20 @@ static json_object *cosem_object_new_int(unsigned char *raw, size_t intlen, bool
 		break;
 	case 2:
 		if (sign)
-			lo = (__int16_t)(raw[1] << 8 | raw[2]);
+			lo = (int16_t)(raw[1] << 8 | raw[2]);
 		else
 			lo = raw[1] << 8 | raw[2];
 		break;
 	case 4:
 		if (sign)
-			lo = (__int32_t)(raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4]);
+			lo = (int32_t)(raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4]);
 		else
 			lo = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
 		break;
 	case 8:
 		hi = raw[1] << 24 | raw[2] << 16 | raw[3] << 8 | raw[4];
 		lo = raw[5] << 24 | raw[6] << 16 | raw[7] << 8 | raw[8];
-		return json_object_new_int64(sign ? (__int64_t)hi << 32 | lo : (__uint64_t)hi << 32 | lo);
+		return json_object_new_int64(sign ? (int64_t)hi << 32 | lo : (uint64_t)hi << 32 | lo);
 	}
 	return json_object_new_int(lo);
 }
