@@ -24,7 +24,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <fcntl.h>
-#include <inttypes.>
+#include <inttypes.h>
 #include <json.h>
 #include <limits.h>
 #include <mosquitto.h>
