@@ -386,6 +386,29 @@ ref Kamstrup sample:
 0906 0101480700FF 120000
 5BE57E
 
+
+Also observed for Kamstrup: L2 and L3 codes and values can be replaced
+by 00 records, maintaining list integrity:
+
+7E A0BA 2B 21 13 EDAA  E6E700
+0F  00000000 0C07E60205060D000AFF800000
+0219
+0A0E 4B616D73747275705F5630303031
+0906 0101000005FF 0A10 35373036353637323731353333323037
+0906 0101600101FF 0A12 36383631313131424E323432313031303430
+0906 0101010700FF 0600000268
+0906 0101020700FF 0600000000
+0906 0101030700FF 0600000053
+0906 0101040700FF 0600000000
+0906 01011F0700FF 0600000122
+00 00
+00 00
+0906 0101200700FF 1200E2
+00 00
+00 00
+05D8 7E
+
+
  */
 
 /* read states:
@@ -724,7 +747,7 @@ static int parse_cosem(unsigned char *buf, size_t buflen, int lvl, json_object *
 		err("Buggy COSEM data - buffer too short: %zd < %d\n", buflen, len);
 		goto err;
 	}
-	if (*ret)
+	if (*ret || len) // must allow NULL ret for null-data
 		return len;
 
 err:
@@ -1385,7 +1408,7 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 				add_obis(pubcfg, ret, "1-0:1.7.0.255", json_object_get(val));
 			else if (!strncmp(key, "obis", 4))
 				mykey = json_object_get_string(val);
-			else {
+			else if (val) { // val is NULL when a Kamstrup list contains null-data pairs - just skip them
 				/* set current list id? */
 				if (i == 1)
 					set_current_list(json_object_get_string(val));
