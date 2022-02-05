@@ -11,5 +11,5 @@ all: $(BINARIES)
 	rm -f *.o *.so *.lo *~ $(BINARIES) 
 
 obinsectd: obinsectd.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
