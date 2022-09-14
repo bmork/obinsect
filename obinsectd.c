@@ -1272,12 +1272,17 @@ static void add_obis(json_object *pubcfg, json_object *pub, const char *key, jso
 	newval = format_value(key, val);
 	if (json_object_object_get_ex(pub, "normal", &tmp))
 		json_object_object_add(tmp, key, newval);
-	add_keyval(pubcfg, pub, key, newval, true);
+
+	/* taking extra ref in case we need to use newval below */
+	add_keyval(pubcfg, pub, key, json_object_get(newval), true);
 	if (alias) {
 		if (json_object_object_get_ex(pub, "alias", &tmp))
-			json_object_object_add(tmp, alias, newval);
+			json_object_object_add(tmp, alias, json_object_get(newval));
 		add_keyval(pubcfg, pub, alias, newval, true);
 	}
+
+	/* drop the extra ref */
+	json_object_put(newval);
 }
 
 /*
