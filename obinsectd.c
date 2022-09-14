@@ -1141,6 +1141,7 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 	if (!json_object_object_get_ex(pubcfg, key, &tmp))
 		return;
 
+	/* take an extra refcount on val so we can use it in the loop below too */
 	json_object_object_add(pub, key, json_object_get(val));
 	for (i = 0; i < json_object_array_length(tmp); i++) {
 		arrayname = json_object_get_string(json_object_array_get_idx(tmp, i));
@@ -1160,6 +1161,8 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 		json_object_object_add(obj, key, json_object_get(val));
 
 	}
+	/* drop extra recount again */
+	json_object_put(val);
 }
 
 static void set_current_list(const char *listname)
