@@ -1198,6 +1198,8 @@ static void set_current_list(const char *listname)
 		obiscode[i] = NULL;
 
 	/* save list pointer */
+	if (current_list)
+		json_object_put(current_list);
 	current_list = json_object_get(list);
 	debug("Current OBIS list set to '%s\n", listname);
 }
@@ -1255,7 +1257,7 @@ static json_object *format_value(const char *key, json_object *val)
 
 	/* we can drop val now */
 	json_object_put(val);
-	
+
 	if (ifactor) {
 		if (!unit)
 			return json_object_new_int(ival * ifactor);
@@ -2095,8 +2097,6 @@ err:
 	sleep(1);	/* give the mosquitto lib some time to flush remaining messages - FIXME: there gotta be a better way? */
 	free(buf);
 	free(printbuffer);
-	if (current_list)
-		json_object_put(current_list);
 	if (cfg)
 		json_object_put(cfg);
 	mosquitto_disconnect(mosq);
