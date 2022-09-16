@@ -1198,7 +1198,7 @@ static void set_current_list(const char *listname)
 		obiscode[i] = NULL;
 
 	/* save list pointer */
-	current_list = list;
+	current_list = json_object_get(list);
 	debug("Current OBIS list set to '%s\n", listname);
 }
 
@@ -1440,7 +1440,7 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 
 	/* include the message time-stamp if available and not 0 */
 	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
-		add_keyval(pubcfg, ret, "date-time", json_object_get(tmp), false);
+		add_keyval(pubcfg, ret, "date-time", tmp, false); /* no need to take a ref - add_keyval will */
 
 	return ret;
 }
@@ -1790,26 +1790,29 @@ static json_object *read_json_file(const char *fname, char *buf, size_t bufsize)
 
 /* we create indexed lookup arrays for each list */
 
-static json_object *parse_obisfile(json_object *lists, const char *fname, char *buf, size_t bufsize)
+static bool parse_obisfile(json_object *lists, const char *fname, char *buf, size_t bufsize)
 {
 	json_object *tmp;
 
 	tmp = read_json_file(fname, buf, bufsize);
 	if (!tmp)
-		return NULL;
+		return false;
 
 	json_object_object_foreach(tmp, key, val) {
 		/* FIXME: ignoring for now... */
 		if (!strcmp("_metadata", key))
 			continue;
-		json_object_object_add(lists, key, val);
+
+		/* take a ref on val since we drop the file object after this */
+		json_object_object_add(lists, key, json_object_get(val));
 
 		/* simply use the first list for lookup until we have something better */
 		if (!current_list)
 			set_current_list(key);
 	}
 
-	return tmp;
+	json_object_put(tmp);
+	return true;
 }
 
 static void read_config()
@@ -1821,7 +1824,10 @@ static void read_config()
 	int i           ;
 
 	/* reset before re-reading */
-	current_list = NULL;
+	if (current_list) {
+		json_object_put(current_list);
+		current_list = NULL;
+	}
 	memset(log_topic, 0, sizeof(log_topic));
 
 	if (cfg)
@@ -2089,6 +2095,8 @@ err:
 	sleep(1);	/* give the mosquitto lib some time to flush remaining messages - FIXME: there gotta be a better way? */
 	free(buf);
 	free(printbuffer);
+	if (current_list)
+		json_object_put(current_list);
 	if (cfg)
 		json_object_put(cfg);
 	mosquitto_disconnect(mosq);
