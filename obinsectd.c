@@ -1078,7 +1078,9 @@ static const char *obis_lookup(int idx)
 	return "unknown";
 }
 
-/* some OBIS codes use "wrong" types - fixup for normalization */
+/* some OBIS codes use "wrong" types - fixup for normalization 
+ *  returned object must be put
+ */
 static json_object *obis_get_val(const char *key, json_object *val)
 {
 	/*
@@ -1132,6 +1134,7 @@ static const char *get_alias(const char *key)
 	return NULL;
 }
 
+/* takes a reference for every added instance of val, and then puts val */
 static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, json_object *val, bool createobj)
 {
 	json_object *tmp, *obj;
@@ -1139,10 +1142,11 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 	int i;
 
 	if (!json_object_object_get_ex(pubcfg, key, &tmp))
-		return;
+		goto ret;
 
 	/* take an extra refcount on val so we can use it in the loop below too */
 	json_object_object_add(pub, key, json_object_get(val));
+
 	for (i = 0; i < json_object_array_length(tmp); i++) {
 		arrayname = json_object_get_string(json_object_array_get_idx(tmp, i));
 
@@ -1161,7 +1165,7 @@ static void add_keyval(json_object *pubcfg, json_object *pub, const char *key, j
 		json_object_object_add(obj, key, json_object_get(val));
 
 	}
-	/* drop extra recount again */
+ret:
 	json_object_put(val);
 }
 
@@ -1204,6 +1208,7 @@ static void set_current_list(const char *listname)
 	debug("Current OBIS list set to '%s\n", listname);
 }
 
+/* this will put val and return a new object to replace it */
 static json_object *format_value(const char *key, json_object *val)
 {
 	const char *unit = get_unit(key);
@@ -1270,13 +1275,13 @@ static json_object *format_value(const char *key, json_object *val)
 	return json_object_new_string(printbuffer);
 }
 
+/* will put val after adding */
 static void add_obis(json_object *pubcfg, json_object *pub, const char *key, json_object *val)
 {
 	const char *alias = get_alias(key);
-	json_object *tmp, *newval = val;
+	json_object *tmp, *newval = format_value(key, val); /* will put val */
 
 	/* we take an extra ref every time newval is used, and then drop one of them in the end */
-	newval = format_value(key, val);
 	if (json_object_object_get_ex(pub, "normal", &tmp))
 		json_object_object_add(tmp, key, json_object_get(newval));
 
@@ -1442,7 +1447,7 @@ static json_object *normalize(json_object *pubcfg, json_object *json)
 
 	/* include the message time-stamp if available and not 0 */
 	if (json_object_object_get_ex(notification, "date-time", &tmp) && json_object_get_int(tmp))
-		add_keyval(pubcfg, ret, "date-time", tmp, false); /* no need to take a ref - add_keyval will */
+		add_keyval(pubcfg, ret, "date-time", json_object_get(tmp), false);
 
 	return ret;
 }
@@ -1539,13 +1544,14 @@ static void add_metadata(json_object *pubcfg, json_object *pubdata, json_object 
 
 	/* add separate metadata items */
 	json_object_object_foreach(meta, mkey, mval)
-		add_keyval(pubcfg, pubdata, mkey, mval, false);
+		add_keyval(pubcfg, pubdata, mkey, json_object_get(mval), false);
 
-	/* add complete metadata blob */
-	add_keyval(pubcfg, pubdata, "metadata", meta, false);
+	/* add complete metadata blob - the  extra ref is dropped by add_keyval() */
+	add_keyval(pubcfg, pubdata, "metadata", json_object_get(meta), false);
 }
 
 static void read_config();
+
 
 static int read_and_parse(int fd, unsigned char *rbuf, size_t rbuflen)
 {
@@ -1636,17 +1642,18 @@ nextframe:
 		/* internally generated data */
 		add_hexdump(pubcfg, pubdata, "rawpacket", hdlc, framelen > 0 ? framelen + 2 : 64);
 		add_metadata(pubcfg, pubdata, json, &tv);
-		add_keyval(pubcfg, pubdata, "parserdata", json, true);
 
-		/* don't want these published on the MQTT debug channel */
+		/* don't want this published on the MQTT debug channel */
 		debug_nomqtt("*** parser data ***\n%s\n", json_object_to_json_string_ext(json, JSON_C_TO_STRING_PRETTY));
+
+		/* will drop json unless it is included in pubdata */
+		add_keyval(pubcfg, pubdata, "parserdata", json, true);
 		debug_nomqtt("*** publish data ***\n%s\n", json_object_to_json_string_ext(pubdata, JSON_C_TO_STRING_PRETTY));
 
 		/* publish everything */
 		publish(pubdata);
 
 		/* drop all per-frame objects */
-		json_object_put(json);
 		json_object_put(pubdata);
 
 		/* skip frame marker only in case of hdlc parse failure */

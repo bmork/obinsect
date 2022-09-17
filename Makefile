@@ -1,4 +1,4 @@
-VERSION := 0.12
+VERSION := 0.13
 
 LDFLAGS=$(shell pkg-config --libs json-c) $(shell pkg-config --libs libmosquitto)
 CFLAGS=-Wall $(shell pkg-config --cflags json-c) $(shell pkg-config --cflags libmosquitto) -DVERSION='"$(VERSION)"' -DWITH_TLS 
